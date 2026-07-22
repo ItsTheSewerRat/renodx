@@ -1,0 +1,168 @@
+#ifndef SRC_ENDFIELD_SHARED_H_
+#define SRC_ENDFIELD_SHARED_H_
+
+struct ShaderInjectData {
+  float peak_white_nits;
+  float diffuse_white_nits;
+  float graphics_white_nits;
+  float color_grade_strength;
+  float tone_map_type;
+  float tone_map_exposure;
+  float tone_map_highlights;
+  float tone_map_shadows;
+  float tone_map_contrast;
+  float tone_map_saturation;
+  float tone_map_highlight_saturation;
+  float tone_map_blowout;
+  float tone_map_dechroma;
+  float tone_map_flare;
+  float tone_map_hue_correction;
+  float tone_map_hue_shift;
+  float tone_map_working_color_space;
+  float tone_map_clamp_color_space;
+  float tone_map_clamp_peak;
+  float tone_map_hue_processor;
+  float tone_map_per_channel;
+  float gamma_correction;
+  float intermediate_scaling;
+  float intermediate_encoding;
+  float intermediate_color_space;
+  float swap_chain_decoding;
+  float swap_chain_gamma_correction;
+  float swap_chain_custom_color_space;
+  float swap_chain_clamp_color_space;
+  float swap_chain_encoding;
+  float swap_chain_encoding_color_space;
+  float custom_flip_uv_y;
+  float fx_rcas_sharpening;
+  float fx_rcas_amount;
+  float tone_map_hdr_video;
+  float tone_map_video_nits;
+  float reno_drt_tone_map_method;
+  float status_text_opacity;
+  float ping_text_opacity;
+  float latency_text_opacity;
+  float latency_bar_draw_opacity;
+  float custom_random;
+  float custom_grain_strength;
+  float vignette_strength;
+  float ui_visibility;
+  float sun_intensity;
+  float bloom_strength;
+  float godrays_intensity;
+  float perchannelblowout;
+  float fog_modification;
+  float shadow_hardening;
+  float chromatic_aberration_strength;
+  float disable_game_ao;
+  float cubemap_ambient_link;
+  float glass_transparency;
+  float improved_ssr;
+  float tech_test_look;
+  float ui_aspect_ratio;
+  float improved_gtao;
+  float fake_cloud_shadows;
+};
+
+#ifndef __cplusplus
+#ifdef __SLANG__
+// The Vulkan port keeps the settings payload out of push constants. Endfield's
+// full payload is 240 bytes, while several game pipelines already consume part
+// of the commonly available 256-byte push-constant budget.
+[[vk::binding(0, 4)]]
+ConstantBuffer<ShaderInjectData> shader_injection;
+#else
+#if ((__SHADER_TARGET_MAJOR == 5 && __SHADER_TARGET_MINOR >= 1) || __SHADER_TARGET_MAJOR >= 6)
+cbuffer shader_injection : register(b13, space50) {
+#elif (__SHADER_TARGET_MAJOR < 5) || ((__SHADER_TARGET_MAJOR == 5) && (__SHADER_TARGET_MINOR < 1))
+cbuffer shader_injection : register(b13) {
+#endif
+  ShaderInjectData shader_injection : packoffset(c0);
+}
+#endif
+
+#define RENODX_TONE_MAP_TYPE                 shader_injection.tone_map_type
+#define RENODX_PEAK_WHITE_NITS               shader_injection.peak_white_nits
+#define RENODX_DIFFUSE_WHITE_NITS            shader_injection.diffuse_white_nits
+#define RENODX_GRAPHICS_WHITE_NITS           shader_injection.graphics_white_nits
+#define RENODX_GAMMA_CORRECTION              shader_injection.gamma_correction
+#define RENODX_TONE_MAP_PER_CHANNEL          shader_injection.tone_map_per_channel
+#define RENODX_TONE_MAP_WORKING_COLOR_SPACE  shader_injection.tone_map_working_color_space
+#define RENODX_TONE_MAP_HUE_PROCESSOR        shader_injection.tone_map_hue_processor
+#define RENODX_TONE_MAP_HUE_CORRECTION       shader_injection.tone_map_hue_correction
+#define RENODX_TONE_MAP_HUE_SHIFT            shader_injection.tone_map_hue_shift
+#define RENODX_TONE_MAP_CLAMP_COLOR_SPACE    shader_injection.tone_map_clamp_color_space
+#define RENODX_TONE_MAP_CLAMP_PEAK           shader_injection.tone_map_clamp_peak
+#define RENODX_TONE_MAP_EXPOSURE             shader_injection.tone_map_exposure
+#define RENODX_TONE_MAP_HIGHLIGHTS           shader_injection.tone_map_highlights
+#define RENODX_TONE_MAP_SHADOWS              shader_injection.tone_map_shadows
+#define RENODX_TONE_MAP_CONTRAST             shader_injection.tone_map_contrast
+#define RENODX_TONE_MAP_SATURATION           shader_injection.tone_map_saturation
+#define RENODX_TONE_MAP_HIGHLIGHT_SATURATION shader_injection.tone_map_highlight_saturation
+#define RENODX_TONE_MAP_BLOWOUT              shader_injection.tone_map_blowout
+#define RENODX_TONE_MAP_DECHROMA             shader_injection.tone_map_dechroma
+#define RENODX_TONE_MAP_FLARE                shader_injection.tone_map_flare
+#define RENODX_COLOR_GRADE_STRENGTH          shader_injection.color_grade_strength
+#define RENODX_INTERMEDIATE_ENCODING         shader_injection.intermediate_encoding
+#define RENODX_SWAP_CHAIN_DECODING           shader_injection.swap_chain_decoding
+#define RENODX_SWAP_CHAIN_GAMMA_CORRECTION   shader_injection.swap_chain_gamma_correction
+#define RENODX_SWAP_CHAIN_CUSTOM_COLOR_SPACE shader_injection.swap_chain_custom_color_space
+#define RENODX_SWAP_CHAIN_SCALING_NITS         (shader_injection.swap_chain_encoding < 4.f ? 1.f : shader_injection.graphics_white_nits)
+#define RENODX_SWAP_CHAIN_CLAMP_NITS           (shader_injection.swap_chain_encoding < 4.f ? 1.f : shader_injection.peak_white_nits)
+#define RENODX_SWAP_CHAIN_CLAMP_COLOR_SPACE    shader_injection.swap_chain_clamp_color_space
+#define RENODX_SWAP_CHAIN_ENCODING             shader_injection.swap_chain_encoding
+#define RENODX_SWAP_CHAIN_ENCODING_COLOR_SPACE shader_injection.swap_chain_encoding_color_space
+#define RENODX_TONE_MAP_HDR_VIDEO              shader_injection.tone_map_hdr_video
+#define RENODX_VIDEO_NITS                      shader_injection.tone_map_video_nits
+#define RENODX_RENO_DRT_TONE_MAP_METHOD        shader_injection.reno_drt_tone_map_method
+#define PING_TEXT_OPACITY                      shader_injection.ping_text_opacity
+#define LATENCY_TEXT_OPACITY                   shader_injection.latency_text_opacity
+#define LATENCY_BAR_DRAW_OPACITY               shader_injection.latency_bar_draw_opacity
+#define STATUS_TEXT_OPACITY                    shader_injection.status_text_opacity
+#define CUSTOM_RANDOM                          shader_injection.custom_random
+#define CUSTOM_GRAIN_STRENGTH                  shader_injection.custom_grain_strength
+#define VIGNETTE_STRENGTH                      shader_injection.vignette_strength
+#define UI_VISIBILITY                          shader_injection.ui_visibility
+#define SUN_INTENSITY                          shader_injection.sun_intensity
+#define BLOOM_STRENGTH                         shader_injection.bloom_strength
+#define GODRAYS_INTENSITY                      shader_injection.godrays_intensity
+#define PER_CHANNEL_BLOWOUT                    shader_injection.perchannelblowout
+#define SHADOW_HARDENING                       shader_injection.shadow_hardening
+#define CHROMATIC_ABERRATION_STRENGTH          shader_injection.chromatic_aberration_strength
+#define FOG_MODIFICATION                       shader_injection.fog_modification
+#define GLASS_TRANSPARENCY                     shader_injection.glass_transparency
+#define TECH_TEST_LOOK                         shader_injection.tech_test_look
+#define UI_ASPECT_RATIO                        shader_injection.ui_aspect_ratio
+#define AO_RADIUS                              4.0
+#define AO_RADIUS_SCALE                        1.0
+#define AO_FALLOFF_RANGE                       1.0
+#define AO_DISTRIBUTION_POWER                  2.0
+#define AO_THIN_OCCLUDER                       2.0
+#define AO_GAMMA                               2.2
+#define AO_TEMPORAL_FRAME                      64.0
+#define AO_MIP_BIAS                            4.0
+#define AO_DIRECTION_COUNT                     6.0
+#define AO_STEP_COUNT                          6.0
+#define AO_NORMAL_ATTENUATION                  0.05
+#define AO_THICKNESS                           0.5
+#define AO_DENOISER_BLUR_BETA                  0.0
+#define AO_BITMASK                             1.0
+#define IMPROVED_GTAO                          shader_injection.improved_gtao
+#define FAKE_CLOUD_SHADOWS                     shader_injection.fake_cloud_shadows
+
+float3 ApplyVFXBoost(float3 color) {
+  if (RENODX_TONE_MAP_TYPE != 0.f
+      && RENODX_SWAP_CHAIN_ENCODING >= 4.f
+      && PER_CHANNEL_BLOWOUT >= 0.5f) {
+    color *= min(
+        sqrt(max(RENODX_PEAK_WHITE_NITS / RENODX_DIFFUSE_WHITE_NITS, 1.f)),
+        5.f);
+  }
+  return color;
+}
+
+#include "../../shaders/renodx.hlsl"
+
+#endif
+
+#endif  // SRC_ENDFIELD_SHARED_H_
