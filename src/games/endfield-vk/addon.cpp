@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstring>
 #include <cwchar>
+#include <deque>
 #include <mutex>
 #include <shared_mutex>
 #include <sstream>
@@ -43,17 +44,15 @@
 namespace {
 
 PFN_vkCreateSwapchainKHR real_vk_create_swapchain = nullptr;
-PFN_vkUpdateDescriptorSets real_vk_update_descriptor_sets = nullptr;
-PFN_vkCmdBindDescriptorSets real_vk_cmd_bind_descriptor_sets = nullptr;
-PFN_vkCmdPushDescriptorSetKHR real_vk_cmd_push_descriptor_set = nullptr;
 PFN_vkCmdSetScissorWithCount vk_cmd_set_scissor_with_count = nullptr;
 bool vulkan_swapchain_hook_installed = false;
-bool vulkan_descriptor_hooks_installed = false;
+std::atomic_bool vfx_boost_tracking_enabled = false;
 std::atomic_uint32_t vulkan_swapchain_width = 0u;
 std::atomic_uint32_t vulkan_swapchain_height = 0u;
 std::once_flag text_split_replay_log_once;
+std::once_flag vfx_readback_failure_log_once;
 
-std::mutex vulkan_descriptor_mutex;
+std::shared_mutex vulkan_descriptor_mutex;
 std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t>>
     vulkan_descriptor_images;
 std::unordered_map<uint64_t, uint64_t> vulkan_graphics_descriptor_set_1;
@@ -64,11 +63,8 @@ uint64_t GetVulkanDescriptorSlotKey(uint32_t binding, uint32_t array_element) {
   return (static_cast<uint64_t>(binding) << 32u) | array_element;
 }
 
-bool IsVulkanImageDescriptor(VkDescriptorType type) {
-  return type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
-      || type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
-      || type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
-      || type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+bool IsTrackedVfxTextureBinding(uint32_t binding) {
+  return binding == 2u || binding == 4u || binding == 8u;
 }
 
 HMODULE GetReshadeVulkanModule() {
@@ -141,168 +137,111 @@ VkResult VKAPI_CALL HookVkCreateSwapchainKHR(
   return retry_result;
 }
 
-void VKAPI_CALL HookVkUpdateDescriptorSets(
-    VkDevice device,
-    uint32_t descriptor_write_count,
-    const VkWriteDescriptorSet* descriptor_writes,
-    uint32_t descriptor_copy_count,
-    const VkCopyDescriptorSet* descriptor_copies) {
-  real_vk_update_descriptor_sets(
-      device,
-      descriptor_write_count,
-      descriptor_writes,
-      descriptor_copy_count,
-      descriptor_copies);
-  const std::lock_guard lock(vulkan_descriptor_mutex);
-  for (uint32_t i = 0u; i < descriptor_write_count; ++i) {
-    const auto& write = descriptor_writes[i];
-    if (!IsVulkanImageDescriptor(write.descriptorType)
-        || write.dstSet == VK_NULL_HANDLE
-        || write.pImageInfo == nullptr) {
-      continue;
-    }
-
-    auto& images = vulkan_descriptor_images[reinterpret_cast<uint64_t>(write.dstSet)];
-    for (uint32_t j = 0u; j < write.descriptorCount; ++j) {
-      const uint64_t slot = GetVulkanDescriptorSlotKey(
-          write.dstBinding, write.dstArrayElement + j);
-      const uint64_t image_view = reinterpret_cast<uint64_t>(write.pImageInfo[j].imageView);
-      if (image_view != 0u) {
-        images[slot] = image_view;
-      } else {
-        images.erase(slot);
-      }
-    }
-  }
-
-  for (uint32_t i = 0u; i < descriptor_copy_count; ++i) {
-    const auto& copy = descriptor_copies[i];
-    if (copy.srcSet == VK_NULL_HANDLE || copy.dstSet == VK_NULL_HANDLE) continue;
-
-    std::vector<uint64_t> copied_views(copy.descriptorCount);
-    const auto source_set = vulkan_descriptor_images.find(
-        reinterpret_cast<uint64_t>(copy.srcSet));
-    if (source_set != vulkan_descriptor_images.end()) {
-      for (uint32_t j = 0u; j < copy.descriptorCount; ++j) {
-        const auto source = source_set->second.find(GetVulkanDescriptorSlotKey(
-            copy.srcBinding, copy.srcArrayElement + j));
-        if (source != source_set->second.end()) copied_views[j] = source->second;
-      }
-    }
-
-    auto& dest_set = vulkan_descriptor_images[reinterpret_cast<uint64_t>(copy.dstSet)];
-    for (uint32_t j = 0u; j < copy.descriptorCount; ++j) {
-      const uint64_t slot = GetVulkanDescriptorSlotKey(
-          copy.dstBinding, copy.dstArrayElement + j);
-      if (copied_views[j] != 0u) {
-        dest_set[slot] = copied_views[j];
-      } else {
-        dest_set.erase(slot);
-      }
-    }
-  }
-}
-
-void VKAPI_CALL HookVkCmdBindDescriptorSets(
-    VkCommandBuffer command_buffer,
-    VkPipelineBindPoint pipeline_bind_point,
-    VkPipelineLayout layout,
-    uint32_t first_set,
-    uint32_t descriptor_set_count,
-    const VkDescriptorSet* descriptor_sets,
-    uint32_t dynamic_offset_count,
-    const uint32_t* dynamic_offsets) {
-  real_vk_cmd_bind_descriptor_sets(
-      command_buffer,
-      pipeline_bind_point,
-      layout,
-      first_set,
-      descriptor_set_count,
-      descriptor_sets,
-      dynamic_offset_count,
-      dynamic_offsets);
-  if (pipeline_bind_point != VK_PIPELINE_BIND_POINT_GRAPHICS
-      || first_set > 1u
-      || first_set + descriptor_set_count <= 1u) {
+void OnBindVfxDescriptorTables(
+    reshade::api::command_list* cmd_list,
+    reshade::api::shader_stage stages,
+    reshade::api::pipeline_layout,
+    uint32_t first,
+    uint32_t count,
+    const reshade::api::descriptor_table* tables) {
+  if (stages != reshade::api::shader_stage::all_graphics
+      || !vfx_boost_tracking_enabled.load(std::memory_order_relaxed)
+      || first > 1u
+      || first + count <= 1u) {
     return;
   }
 
-  const uint64_t command_buffer_key = reinterpret_cast<uint64_t>(command_buffer);
+  const uint64_t command_buffer = reinterpret_cast<uint64_t>(
+      reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
   const std::lock_guard lock(vulkan_descriptor_mutex);
-  vulkan_graphics_descriptor_set_1[command_buffer_key] = reinterpret_cast<uint64_t>(
-      descriptor_sets[1u - first_set]);
-  vulkan_graphics_push_images_set_1.erase(command_buffer_key);
+  vulkan_graphics_descriptor_set_1[command_buffer] = tables[1u - first].handle;
+  vulkan_graphics_push_images_set_1.erase(command_buffer);
 }
 
-void VKAPI_CALL HookVkCmdPushDescriptorSetKHR(
-    VkCommandBuffer command_buffer,
-    VkPipelineBindPoint pipeline_bind_point,
-    VkPipelineLayout layout,
+void OnPushVfxDescriptors(
+    reshade::api::command_list* cmd_list,
+    reshade::api::shader_stage stages,
+    reshade::api::pipeline_layout,
     uint32_t set,
-    uint32_t descriptor_write_count,
-    const VkWriteDescriptorSet* descriptor_writes) {
-  real_vk_cmd_push_descriptor_set(
-      command_buffer,
-      pipeline_bind_point,
-      layout,
-      set,
-      descriptor_write_count,
-      descriptor_writes);
-  if (pipeline_bind_point != VK_PIPELINE_BIND_POINT_GRAPHICS || set != 1u) return;
+    const reshade::api::descriptor_table_update& update) {
+  if (stages != reshade::api::shader_stage::all_graphics
+      || !vfx_boost_tracking_enabled.load(std::memory_order_relaxed)
+      || set != 1u
+      || !IsTrackedVfxTextureBinding(update.binding)
+      || update.array_offset != 0u
+      || update.count == 0u
+      || update.descriptors == nullptr
+      || (update.type != reshade::api::descriptor_type::texture_shader_resource_view
+          && update.type
+              != reshade::api::descriptor_type::sampler_with_resource_view)) {
+    return;
+  }
 
-  const uint64_t command_buffer_key = reinterpret_cast<uint64_t>(command_buffer);
+  const uint64_t command_buffer = reinterpret_cast<uint64_t>(
+      reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
   const std::lock_guard lock(vulkan_descriptor_mutex);
-  vulkan_graphics_descriptor_set_1.erase(command_buffer_key);
-  auto& images = vulkan_graphics_push_images_set_1[command_buffer_key];
-  for (uint32_t i = 0u; i < descriptor_write_count; ++i) {
-    const auto& write = descriptor_writes[i];
-    if (!IsVulkanImageDescriptor(write.descriptorType) || write.pImageInfo == nullptr) {
-      continue;
-    }
-    for (uint32_t j = 0u; j < write.descriptorCount; ++j) {
-      const uint64_t slot = GetVulkanDescriptorSlotKey(
-          write.dstBinding, write.dstArrayElement + j);
-      const uint64_t image_view = reinterpret_cast<uint64_t>(write.pImageInfo[j].imageView);
-      if (image_view != 0u) {
-        images[slot] = image_view;
-      } else {
-        images.erase(slot);
-      }
-    }
+  vulkan_graphics_descriptor_set_1.erase(command_buffer);
+  auto& images = vulkan_graphics_push_images_set_1[command_buffer];
+  const uint64_t image_view = update.type
+          == reshade::api::descriptor_type::texture_shader_resource_view
+      ? static_cast<const reshade::api::resource_view*>(update.descriptors)[0].handle
+      : static_cast<const reshade::api::sampler_with_resource_view*>(
+            update.descriptors)[0]
+            .view.handle;
+  const uint64_t slot = GetVulkanDescriptorSlotKey(update.binding, 0u);
+  if (image_view != 0u) {
+    images[slot] = image_view;
+  } else {
+    images.erase(slot);
   }
 }
 
-// Descriptor-template updates bypass vkUpdateDescriptorSets, but ReShade emits
-// them through this event with the destination descriptor table intact.
+// ReShade emits both regular and descriptor-template updates through this event
+// with the destination descriptor table intact.
 bool OnUpdateVfxDescriptorTables(
     reshade::api::device*,
     uint32_t count,
     const reshade::api::descriptor_table_update* updates) {
+  bool has_tracked_descriptors = false;
+  for (uint32_t i = 0u; i < count; ++i) {
+    if (IsTrackedVfxTextureBinding(updates[i].binding)
+        && updates[i].array_offset == 0u
+        && updates[i].count != 0u
+        && (updates[i].type
+                == reshade::api::descriptor_type::texture_shader_resource_view
+            || updates[i].type
+                == reshade::api::descriptor_type::sampler_with_resource_view)) {
+      has_tracked_descriptors = true;
+      break;
+    }
+  }
+  if (!has_tracked_descriptors) return false;
+
   const std::lock_guard lock(vulkan_descriptor_mutex);
   for (uint32_t i = 0u; i < count; ++i) {
     const auto& update = updates[i];
     if (update.table.handle == 0u
         || update.descriptors == nullptr
+        || !IsTrackedVfxTextureBinding(update.binding)
+        || update.array_offset != 0u
+        || update.count == 0u
         || (update.type != reshade::api::descriptor_type::texture_shader_resource_view
             && update.type != reshade::api::descriptor_type::sampler_with_resource_view)) {
       continue;
     }
 
+    const uint64_t image_view = update.type
+            == reshade::api::descriptor_type::texture_shader_resource_view
+        ? static_cast<const reshade::api::resource_view*>(update.descriptors)[0].handle
+        : static_cast<const reshade::api::sampler_with_resource_view*>(
+              update.descriptors)[0]
+              .view.handle;
     auto& images = vulkan_descriptor_images[update.table.handle];
-    for (uint32_t j = 0u; j < update.count; ++j) {
-      const uint64_t image_view = update.type
-              == reshade::api::descriptor_type::texture_shader_resource_view
-          ? static_cast<const reshade::api::resource_view*>(update.descriptors)[j].handle
-          : static_cast<const reshade::api::sampler_with_resource_view*>(
-                update.descriptors)[j]
-                .view.handle;
-      const uint64_t slot = GetVulkanDescriptorSlotKey(
-          update.binding, update.array_offset + j);
-      if (image_view != 0u) {
-        images[slot] = image_view;
-      } else {
-        images.erase(slot);
-      }
+    const uint64_t slot = GetVulkanDescriptorSlotKey(update.binding, 0u);
+    if (image_view != 0u) {
+      images[slot] = image_view;
+    } else {
+      images.erase(slot);
     }
   }
   return false;
@@ -312,30 +251,42 @@ bool OnCopyVfxDescriptorTables(
     reshade::api::device*,
     uint32_t count,
     const reshade::api::descriptor_table_copy* copies) {
+  bool has_tracked_descriptors = false;
+  for (uint32_t i = 0u; i < count; ++i) {
+    if (IsTrackedVfxTextureBinding(copies[i].dest_binding)
+        && copies[i].dest_array_offset == 0u
+        && copies[i].count != 0u) {
+      has_tracked_descriptors = true;
+      break;
+    }
+  }
+  if (!has_tracked_descriptors) return false;
+
   const std::lock_guard lock(vulkan_descriptor_mutex);
   for (uint32_t i = 0u; i < count; ++i) {
     const auto& copy = copies[i];
-    if (copy.source_table.handle == 0u || copy.dest_table.handle == 0u) continue;
+    if (!IsTrackedVfxTextureBinding(copy.dest_binding)
+        || copy.dest_array_offset != 0u
+        || copy.count == 0u
+        || copy.source_table.handle == 0u
+        || copy.dest_table.handle == 0u) {
+      continue;
+    }
 
-    std::vector<uint64_t> copied_views(copy.count);
+    uint64_t copied_view = 0u;
     const auto source_set = vulkan_descriptor_images.find(copy.source_table.handle);
     if (source_set != vulkan_descriptor_images.end()) {
-      for (uint32_t j = 0u; j < copy.count; ++j) {
-        const auto source = source_set->second.find(GetVulkanDescriptorSlotKey(
-            copy.source_binding, copy.source_array_offset + j));
-        if (source != source_set->second.end()) copied_views[j] = source->second;
-      }
+      const auto source = source_set->second.find(GetVulkanDescriptorSlotKey(
+          copy.source_binding, copy.source_array_offset));
+      if (source != source_set->second.end()) copied_view = source->second;
     }
 
     auto& dest_set = vulkan_descriptor_images[copy.dest_table.handle];
-    for (uint32_t j = 0u; j < copy.count; ++j) {
-      const uint64_t slot = GetVulkanDescriptorSlotKey(
-          copy.dest_binding, copy.dest_array_offset + j);
-      if (copied_views[j] != 0u) {
-        dest_set[slot] = copied_views[j];
-      } else {
-        dest_set.erase(slot);
-      }
+    const uint64_t slot = GetVulkanDescriptorSlotKey(copy.dest_binding, 0u);
+    if (copied_view != 0u) {
+      dest_set[slot] = copied_view;
+    } else {
+      dest_set.erase(slot);
     }
   }
   return false;
@@ -400,55 +351,6 @@ void OnInitVulkanSwapchainHook(reshade::api::device* device) {
     }
   }
 
-  if (vulkan_descriptor_hooks_installed) return;
-
-  real_vk_update_descriptor_sets = reinterpret_cast<PFN_vkUpdateDescriptorSets>(
-      get_device_proc_addr(native_device, "vkUpdateDescriptorSets"));
-  real_vk_cmd_bind_descriptor_sets = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(
-      get_device_proc_addr(native_device, "vkCmdBindDescriptorSets"));
-  real_vk_cmd_push_descriptor_set = reinterpret_cast<PFN_vkCmdPushDescriptorSetKHR>(
-      get_device_proc_addr(native_device, "vkCmdPushDescriptorSetKHR"));
-  if (real_vk_update_descriptor_sets == nullptr
-      || real_vk_cmd_bind_descriptor_sets == nullptr) {
-    real_vk_update_descriptor_sets = nullptr;
-    real_vk_cmd_bind_descriptor_sets = nullptr;
-    real_vk_cmd_push_descriptor_set = nullptr;
-    reshade::log::message(
-        reshade::log::level::error,
-        "[Endfield-VK] Native Vulkan descriptor entry points were unavailable; VFX texture matching cannot run.");
-    return;
-  }
-
-  if (DetourTransactionBegin() != NO_ERROR
-      || DetourUpdateThread(GetCurrentThread()) != NO_ERROR
-      || DetourAttach(
-             reinterpret_cast<void**>(&real_vk_update_descriptor_sets),
-             HookVkUpdateDescriptorSets)
-             != NO_ERROR
-      || DetourAttach(
-             reinterpret_cast<void**>(&real_vk_cmd_bind_descriptor_sets),
-             HookVkCmdBindDescriptorSets)
-             != NO_ERROR
-      || (real_vk_cmd_push_descriptor_set != nullptr
-          && DetourAttach(
-                 reinterpret_cast<void**>(&real_vk_cmd_push_descriptor_set),
-                 HookVkCmdPushDescriptorSetKHR)
-                 != NO_ERROR)
-      || DetourTransactionCommit() != NO_ERROR) {
-    DetourTransactionAbort();
-    real_vk_update_descriptor_sets = nullptr;
-    real_vk_cmd_bind_descriptor_sets = nullptr;
-    real_vk_cmd_push_descriptor_set = nullptr;
-    reshade::log::message(
-        reshade::log::level::error,
-        "[Endfield-VK] Failed to install the native Vulkan descriptor hooks for VFX texture matching.");
-    return;
-  }
-
-  vulkan_descriptor_hooks_installed = true;
-  reshade::log::message(
-      reshade::log::level::info,
-      "[Endfield-VK] Installed native Vulkan descriptor tracking for VFX texture matching.");
 }
 
 void UninstallVulkanSwapchainHook() {
@@ -463,34 +365,6 @@ void UninstallVulkanSwapchainHook() {
       && DetourTransactionCommit() == NO_ERROR) {
     vulkan_swapchain_hook_installed = false;
     real_vk_create_swapchain = nullptr;
-  } else {
-    DetourTransactionAbort();
-  }
-}
-
-void UninstallVulkanDescriptorHooks() {
-  if (!vulkan_descriptor_hooks_installed) return;
-
-  if (DetourTransactionBegin() == NO_ERROR
-      && DetourUpdateThread(GetCurrentThread()) == NO_ERROR
-      && DetourDetach(
-             reinterpret_cast<void**>(&real_vk_update_descriptor_sets),
-             HookVkUpdateDescriptorSets)
-             == NO_ERROR
-      && DetourDetach(
-             reinterpret_cast<void**>(&real_vk_cmd_bind_descriptor_sets),
-             HookVkCmdBindDescriptorSets)
-             == NO_ERROR
-      && (real_vk_cmd_push_descriptor_set == nullptr
-          || DetourDetach(
-                 reinterpret_cast<void**>(&real_vk_cmd_push_descriptor_set),
-                 HookVkCmdPushDescriptorSetKHR)
-                 == NO_ERROR)
-      && DetourTransactionCommit() == NO_ERROR) {
-    vulkan_descriptor_hooks_installed = false;
-    real_vk_update_descriptor_sets = nullptr;
-    real_vk_cmd_bind_descriptor_sets = nullptr;
-    real_vk_cmd_push_descriptor_set = nullptr;
   } else {
     DetourTransactionAbort();
   }
@@ -763,11 +637,47 @@ constexpr std::array vfx_boost_matches = {
 
 std::shared_mutex vfx_texture_mutex;
 std::unordered_map<uint64_t, uint32_t> vfx_texture_crcs;
+std::array<uint32_t, vfx_boost_matches.size()> vfx_match_view_counts = {};
 std::mutex vfx_readback_mutex;
 std::unordered_set<uint64_t> vfx_readback_seen;
-std::vector<uint64_t> vfx_pending_readbacks;
+std::deque<uint64_t> vfx_pending_readbacks;
+
+struct VfxReadbackState {
+  reshade::api::device* device = nullptr;
+  reshade::api::resource intermediate = {0u};
+  reshade::api::fence fence = {0u};
+  uint64_t fence_value = 0u;
+  uint64_t image_view = 0u;
+  reshade::api::resource_desc desc = {};
+  uint32_t row_pitch = 0u;
+  uint32_t slice_pitch = 0u;
+  bool canceled = false;
+  bool failed = false;
+};
+
+VfxReadbackState vfx_readback_state;
+
+void SetVfxBoostTrackingEnabled(bool enabled) {
+  if (vfx_boost_tracking_enabled.exchange(enabled, std::memory_order_relaxed)
+      == enabled) {
+    return;
+  }
+  if (enabled) return;
+
+  {
+    const std::lock_guard lock(vfx_readback_mutex);
+    for (const uint64_t image_view : vfx_pending_readbacks) {
+      vfx_readback_seen.erase(image_view);
+    }
+    vfx_pending_readbacks.clear();
+  }
+  const std::lock_guard lock(vulkan_descriptor_mutex);
+  vulkan_graphics_descriptor_set_1.clear();
+  vulkan_graphics_push_images_set_1.clear();
+}
 
 void OnResetVfxCommandList(reshade::api::command_list* cmd_list) {
+  if (!vfx_boost_tracking_enabled.load(std::memory_order_relaxed)) return;
   const uint64_t command_buffer = reinterpret_cast<uint64_t>(
       reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
   const std::lock_guard lock(vulkan_descriptor_mutex);
@@ -822,27 +732,24 @@ void OnDestroyVfxResourceView(
     reshade::api::device*,
     reshade::api::resource_view view) {
   {
-    const std::lock_guard lock(vulkan_descriptor_mutex);
-    for (auto& [set, images] : vulkan_descriptor_images) {
-      std::erase_if(images, [view](const auto& entry) {
-        return entry.second == view.handle;
-      });
-    }
-    for (auto& [command_buffer, images] : vulkan_graphics_push_images_set_1) {
-      std::erase_if(images, [view](const auto& entry) {
-        return entry.second == view.handle;
-      });
+    const std::lock_guard lock(vfx_readback_mutex);
+    vfx_readback_seen.erase(view.handle);
+    std::erase(vfx_pending_readbacks, view.handle);
+    if (vfx_readback_state.image_view == view.handle) {
+      vfx_readback_state.canceled = true;
     }
   }
 
-  {
-    const std::lock_guard lock(vfx_texture_mutex);
-    vfx_texture_crcs.erase(view.handle);
+  const std::lock_guard lock(vfx_texture_mutex);
+  const auto cached_crc = vfx_texture_crcs.find(view.handle);
+  if (cached_crc == vfx_texture_crcs.end()) return;
+  for (size_t i = 0u; i < vfx_boost_matches.size(); ++i) {
+    if (cached_crc->second == vfx_boost_matches[i].texture_crc) {
+      if (vfx_match_view_counts[i] != 0u) --vfx_match_view_counts[i];
+      break;
+    }
   }
-
-  const std::lock_guard lock(vfx_readback_mutex);
-  vfx_readback_seen.erase(view.handle);
-  std::erase(vfx_pending_readbacks, view.handle);
+  vfx_texture_crcs.erase(cached_crc);
 }
 
 reshade::api::resource_view GetBoundVfxTextureView(
@@ -851,7 +758,7 @@ reshade::api::resource_view GetBoundVfxTextureView(
   const uint64_t command_buffer = reinterpret_cast<uint64_t>(
       reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
   const uint64_t descriptor_slot = GetVulkanDescriptorSlotKey(binding, 0u);
-  const std::lock_guard lock(vulkan_descriptor_mutex);
+  const std::shared_lock lock(vulkan_descriptor_mutex);
 
   const auto pushed = vulkan_graphics_push_images_set_1.find(command_buffer);
   if (pushed != vulkan_graphics_push_images_set_1.end()) {
@@ -869,106 +776,209 @@ reshade::api::resource_view GetBoundVfxTextureView(
       : reshade::api::resource_view{0u};
 }
 
+bool AreAllVfxBoostTexturesResolved() {
+  const std::shared_lock lock(vfx_texture_mutex);
+  return std::all_of(
+      vfx_match_view_counts.begin(),
+      vfx_match_view_counts.end(),
+      [](uint32_t count) { return count != 0u; });
+}
+
 void QueueVfxTextureReadback(reshade::api::resource_view view) {
-  if (view.handle == 0u) return;
+  if (view.handle == 0u
+      || !vfx_boost_tracking_enabled.load(std::memory_order_relaxed)
+      || AreAllVfxBoostTexturesResolved()) {
+    return;
+  }
+
   const std::lock_guard lock(vfx_readback_mutex);
+  constexpr size_t kMaxPendingReadbacks = 64u;
+  if (vfx_pending_readbacks.size() >= kMaxPendingReadbacks) return;
   if (!vfx_readback_seen.emplace(view.handle).second) return;
   vfx_pending_readbacks.push_back(view.handle);
 }
 
 void ProcessPendingVfxTextureReadback(reshade::api::command_queue* queue) {
-  uint64_t image_view = 0u;
+  auto* device = queue->get_device();
+  const std::lock_guard lock(vfx_readback_mutex);
+  if (vfx_readback_state.device != nullptr
+      && vfx_readback_state.device != device) {
+    return;
+  }
+  if (vfx_readback_state.failed) return;
+
+  if (vfx_readback_state.image_view != 0u) {
+    if (device->get_completed_fence_value(vfx_readback_state.fence)
+        < vfx_readback_state.fence_value) {
+      return;
+    }
+
+    if (!vfx_readback_state.canceled) {
+      void* mapped_data = nullptr;
+      if (device->map_buffer_region(
+              vfx_readback_state.intermediate,
+              0u,
+              vfx_readback_state.slice_pitch,
+              reshade::api::map_access::read_only,
+              &mapped_data)) {
+        uint32_t texture_crc = 0u;
+        const bool all_zero = std::all_of(
+            static_cast<const uint8_t*>(mapped_data),
+            static_cast<const uint8_t*>(mapped_data)
+                + vfx_readback_state.slice_pitch,
+            [](uint8_t value) { return value == 0u; });
+        const bool computed = ComputeVfxTextureCrc(
+            vfx_readback_state.desc,
+            reshade::api::subresource_data{
+                .data = mapped_data,
+                .row_pitch = vfx_readback_state.row_pitch,
+                .slice_pitch = vfx_readback_state.slice_pitch,
+            },
+            &texture_crc);
+        device->unmap_buffer_region(vfx_readback_state.intermediate);
+
+        if (!all_zero && computed) {
+          const std::lock_guard texture_lock(vfx_texture_mutex);
+          const bool inserted = vfx_texture_crcs
+                                    .emplace(
+                                        vfx_readback_state.image_view,
+                                        texture_crc)
+                                    .second;
+          if (inserted) {
+            for (size_t i = 0u; i < vfx_boost_matches.size(); ++i) {
+              if (texture_crc == vfx_boost_matches[i].texture_crc) {
+                ++vfx_match_view_counts[i];
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    vfx_readback_state.image_view = 0u;
+    vfx_readback_state.canceled = false;
+  }
+
+  if (!vfx_boost_tracking_enabled.load(std::memory_order_relaxed)) return;
+  if (AreAllVfxBoostTexturesResolved()) {
+    for (const uint64_t image_view : vfx_pending_readbacks) {
+      vfx_readback_seen.erase(image_view);
+    }
+    vfx_pending_readbacks.clear();
+    return;
+  }
+
+  while (!vfx_pending_readbacks.empty()) {
+    const uint64_t image_view = vfx_pending_readbacks.front();
+    vfx_pending_readbacks.pop_front();
+    const reshade::api::resource_view view = {image_view};
+    const auto resource = device->get_resource_from_view(view);
+    if (resource.handle == 0u) continue;
+
+    const auto desc = device->get_resource_desc(resource);
+    if (!IsVfxTextureDesc(desc)
+        || !renodx::utils::bitwise::HasFlag(
+            desc.usage, reshade::api::resource_usage::copy_source)) {
+      continue;
+    }
+
+    const auto view_desc = device->get_resource_view_desc(view);
+    if (view_desc.texture.first_level != 0u) continue;
+    const uint32_t levels = std::max<uint32_t>(desc.texture.levels, 1u);
+    const uint32_t subresource = view_desc.texture.first_layer * levels;
+    const uint32_t row_pitch = reshade::api::format_row_pitch(
+        desc.texture.format, desc.texture.width);
+    const uint32_t slice_pitch = reshade::api::format_slice_pitch(
+        desc.texture.format, row_pitch, desc.texture.height);
+    if (row_pitch == 0u || slice_pitch == 0u) continue;
+
+    if (vfx_readback_state.device == nullptr) {
+      reshade::api::fence fence = {0u};
+      if (!device->create_fence(
+              0u, reshade::api::fence_flags::none, &fence)) {
+        return;
+      }
+      vfx_readback_state.device = device;
+      vfx_readback_state.fence = fence;
+    }
+    if (vfx_readback_state.intermediate.handle == 0u
+        && !device->create_resource(
+            reshade::api::resource_desc(
+                static_cast<uint64_t>(slice_pitch),
+                reshade::api::memory_heap::gpu_to_cpu,
+                reshade::api::resource_usage::copy_dest),
+            nullptr,
+            reshade::api::resource_usage::copy_dest,
+            &vfx_readback_state.intermediate)) {
+      return;
+    }
+
+    auto* cmd_list = queue->get_immediate_command_list();
+    if (cmd_list == nullptr) return;
+    cmd_list->barrier(
+        resource,
+        reshade::api::resource_usage::shader_resource,
+        reshade::api::resource_usage::copy_source);
+    cmd_list->copy_texture_to_buffer(
+        resource,
+        subresource,
+        nullptr,
+        vfx_readback_state.intermediate,
+        0u,
+        desc.texture.width,
+        desc.texture.height);
+    cmd_list->barrier(
+        resource,
+        reshade::api::resource_usage::copy_source,
+        reshade::api::resource_usage::shader_resource);
+    queue->flush_immediate_command_list();
+
+    vfx_readback_state.image_view = image_view;
+    vfx_readback_state.desc = desc;
+    vfx_readback_state.row_pitch = row_pitch;
+    vfx_readback_state.slice_pitch = slice_pitch;
+    vfx_readback_state.canceled = false;
+    ++vfx_readback_state.fence_value;
+    if (!queue->signal(
+            vfx_readback_state.fence,
+            vfx_readback_state.fence_value)) {
+      vfx_readback_state.image_view = 0u;
+      vfx_readback_state.failed = true;
+      std::call_once(vfx_readback_failure_log_once, []() {
+        reshade::log::message(
+            reshade::log::level::error,
+            "[Endfield-VK] Failed to signal the asynchronous VFX texture readback; texture discovery is disabled for this device.");
+      });
+    }
+    return;
+  }
+}
+
+void OnDestroyVfxDevice(reshade::api::device* device) {
   {
     const std::lock_guard lock(vfx_readback_mutex);
-    if (vfx_pending_readbacks.empty()) return;
-    image_view = vfx_pending_readbacks.back();
-    vfx_pending_readbacks.pop_back();
+    if (vfx_readback_state.device == device) {
+      if (vfx_readback_state.intermediate.handle != 0u) {
+        device->destroy_resource(vfx_readback_state.intermediate);
+      }
+      if (vfx_readback_state.fence.handle != 0u) {
+        device->destroy_fence(vfx_readback_state.fence);
+      }
+      vfx_readback_state = {};
+    }
+    vfx_readback_seen.clear();
+    vfx_pending_readbacks.clear();
   }
-
-  auto* device = queue->get_device();
-  const reshade::api::resource_view view = {image_view};
-  const auto resource = device->get_resource_from_view(view);
-  if (resource.handle == 0u) return;
-
-  const auto desc = device->get_resource_desc(resource);
-  if (!IsVfxTextureDesc(desc)) return;
-  if (!renodx::utils::bitwise::HasFlag(
-          desc.usage, reshade::api::resource_usage::copy_source)) {
-    return;
-  }
-
-  const auto view_desc = device->get_resource_view_desc(view);
-  if (view_desc.texture.first_level != 0u) return;
-  const uint32_t levels = std::max<uint32_t>(desc.texture.levels, 1u);
-  const uint32_t subresource = view_desc.texture.first_layer * levels;
-  const uint32_t row_pitch = reshade::api::format_row_pitch(
-      desc.texture.format, desc.texture.width);
-  const uint32_t slice_pitch = reshade::api::format_slice_pitch(
-      desc.texture.format, row_pitch, desc.texture.height);
-  if (row_pitch == 0u || slice_pitch == 0u) return;
-
-  reshade::api::resource intermediate = {0u};
-  if (!device->create_resource(
-          reshade::api::resource_desc(
-              static_cast<uint64_t>(slice_pitch),
-              reshade::api::memory_heap::gpu_to_cpu,
-              reshade::api::resource_usage::copy_dest),
-          nullptr,
-          reshade::api::resource_usage::copy_dest,
-          &intermediate)) return;
-
-  auto* cmd_list = queue->get_immediate_command_list();
-  cmd_list->barrier(
-      resource,
-      reshade::api::resource_usage::shader_resource,
-      reshade::api::resource_usage::copy_source);
-  cmd_list->copy_texture_to_buffer(
-      resource,
-      subresource,
-      nullptr,
-      intermediate,
-      0u,
-      desc.texture.width,
-      desc.texture.height);
-  cmd_list->barrier(
-      resource,
-      reshade::api::resource_usage::copy_source,
-      reshade::api::resource_usage::shader_resource);
-  queue->flush_immediate_command_list();
-  queue->wait_idle();
-
-  void* mapped_data = nullptr;
-  if (!device->map_buffer_region(
-          intermediate,
-          0u,
-          slice_pitch,
-          reshade::api::map_access::read_only,
-          &mapped_data)) {
-    device->destroy_resource(intermediate);
-    return;
-  }
-
-  uint32_t texture_crc = 0u;
-  const bool all_zero = std::all_of(
-      static_cast<const uint8_t*>(mapped_data),
-      static_cast<const uint8_t*>(mapped_data) + slice_pitch,
-      [](uint8_t value) { return value == 0u; });
-  const bool computed = ComputeVfxTextureCrc(
-      desc,
-      reshade::api::subresource_data{
-          .data = mapped_data,
-          .row_pitch = row_pitch,
-          .slice_pitch = slice_pitch,
-      },
-      &texture_crc);
-  device->unmap_buffer_region(intermediate);
-  device->destroy_resource(intermediate);
-  if (all_zero || !computed) return;
-
   {
     const std::lock_guard lock(vfx_texture_mutex);
-    vfx_texture_crcs[image_view] = texture_crc;
+    vfx_texture_crcs.clear();
+    vfx_match_view_counts.fill(0u);
   }
+  const std::lock_guard lock(vulkan_descriptor_mutex);
+  vulkan_descriptor_images.clear();
+  vulkan_graphics_descriptor_set_1.clear();
+  vulkan_graphics_push_images_set_1.clear();
 }
 
 constexpr std::array<uint32_t, 12> kVulkanUiVisibilityPixelShaderHashes = {
@@ -1096,9 +1106,11 @@ bool ReplaceVFXBoostShader(
   if (shader_state == nullptr) return false;
 
   if (!IsVisible(shader_injection.perchannelblowout)) {
+    SetVfxBoostTrackingEnabled(false);
     RestoreVFXBoostShader(cmd_list, shader_state);
     return false;
   }
+  SetVfxBoostTrackingEnabled(true);
 
   const auto texture_view = GetBoundVfxTextureView(cmd_list, match.texture_binding);
   if (texture_view.handle == 0u) {
@@ -1755,6 +1767,9 @@ renodx::utils::settings::Settings settings = {
         .section = "Rendering Improvements",
         .tooltip = "Boosts supported VFX highlights.",
         .labels = {"Original", "Enhanced"},
+        .on_change_value = [](float, float current) {
+          SetVfxBoostTrackingEnabled(IsVisible(current));
+        },
     },
     new renodx::utils::settings::Setting{
         .key = "HDRSun",
@@ -2003,6 +2018,7 @@ void OnPresetOff() {
      renodx::utils::settings::UpdateSetting("CubemapAmbientLink", 0.f);
       renodx::utils::settings::UpdateSetting("GlassTransparency", 0.f);
       renodx::utils::settings::UpdateSetting("VFXBoost", 0.f);
+     SetVfxBoostTrackingEnabled(false);
      renodx::utils::settings::UpdateSetting("ImprovedSSR", 0.f);
      renodx::utils::settings::UpdateSetting("ImprovedGTAO", 0.f);
      renodx::utils::settings::UpdateSetting("TechTestLook", 0.f);
@@ -2413,9 +2429,12 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           }
         }
         reshade::register_event<reshade::addon_event::reset_command_list>(OnResetVfxCommandList);
+        reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyVfxDevice);
         reshade::register_event<reshade::addon_event::destroy_resource_view>(OnDestroyVfxResourceView);
         reshade::register_event<reshade::addon_event::update_descriptor_tables>(OnUpdateVfxDescriptorTables);
         reshade::register_event<reshade::addon_event::copy_descriptor_tables>(OnCopyVfxDescriptorTables);
+        reshade::register_event<reshade::addon_event::bind_descriptor_tables>(OnBindVfxDescriptorTables);
+        reshade::register_event<reshade::addon_event::push_descriptors>(OnPushVfxDescriptors);
         for (const uint32_t crc : kVulkanDirectHidePixelShaderHashes) {
           RegisterUiVisibilityBypassShader(crc);
         }
@@ -2441,14 +2460,16 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       break;
     case DLL_PROCESS_DETACH:
       reshade::unregister_event<reshade::addon_event::init_device>(OnInitVulkanSwapchainHook);
-      UninstallVulkanDescriptorHooks();
       UninstallVulkanSwapchainHook();
       reshade::unregister_event<reshade::addon_event::draw>(OnDraw);
       reshade::unregister_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
       reshade::unregister_event<reshade::addon_event::reset_command_list>(OnResetVfxCommandList);
+      reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyVfxDevice);
       reshade::unregister_event<reshade::addon_event::destroy_resource_view>(OnDestroyVfxResourceView);
       reshade::unregister_event<reshade::addon_event::update_descriptor_tables>(OnUpdateVfxDescriptorTables);
       reshade::unregister_event<reshade::addon_event::copy_descriptor_tables>(OnCopyVfxDescriptorTables);
+      reshade::unregister_event<reshade::addon_event::bind_descriptor_tables>(OnBindVfxDescriptorTables);
+      reshade::unregister_event<reshade::addon_event::push_descriptors>(OnPushVfxDescriptors);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
       reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(OnReshadeBeginEffects);
       reshade::unregister_event<reshade::addon_event::reshade_finish_effects>(OnReshadeFinishEffects);
@@ -2456,6 +2477,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   }
 
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
+  if (fdw_reason == DLL_PROCESS_ATTACH) {
+    SetVfxBoostTrackingEnabled(IsVisible(shader_injection.perchannelblowout));
+  }
   SyncSwapChainInjection();
   renodx::mods::swapchain::Use(fdw_reason, &swap_chain_injection);
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
