@@ -1001,6 +1001,7 @@ constexpr std::array<uint32_t, 2> kVulkanDirectHidePixelShaderHashes = {
     0xACF0F46Du,
 };
 
+constexpr uint32_t kVulkanPingVertexShaderHash = 0xDB010722u;
 constexpr uint32_t kVulkanPingPixelShaderHash = 0x512AB6E6u;
 
 bool IsVisible(float value) {
@@ -2052,6 +2053,9 @@ bool OnDrawIndexed(
     int32_t vertex_offset,
     uint32_t first_instance) {
   auto* shader_state = renodx::utils::shader::GetCurrentState(cmd_list);
+  const uint32_t vertex_shader_hash = shader_state != nullptr
+      ? renodx::utils::shader::GetCurrentVertexShaderHash(shader_state)
+      : 0u;
   const uint32_t pixel_shader_hash = shader_state != nullptr
       ? renodx::utils::shader::GetCurrentPixelShaderHash(shader_state)
       : 0u;
@@ -2073,6 +2077,7 @@ bool OnDrawIndexed(
                                        (first_index == PING_FIRST_INDEX) &&
                                        (vertex_offset == PING_VERTEX_OFFSET);
   const bool latency_bar_draw_candidate = ping_geometry_candidate
+                                          && vertex_shader_hash == kVulkanPingVertexShaderHash
                                           && pixel_shader_hash == kVulkanPingPixelShaderHash;
   is_ping_input_candidate = latency_bar_draw_candidate && (draw_call_vertex_count == 0);
   shader_injection.latency_bar_draw_opacity = latency_bar_draw_candidate
