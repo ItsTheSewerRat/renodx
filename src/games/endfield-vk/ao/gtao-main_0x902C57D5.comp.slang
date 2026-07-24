@@ -42,7 +42,7 @@ uint BM_UpdateSectors(float minHorizon, float maxHorizon, uint bm) {
   startBit = clamp(startBit, 0, 31);
   numBits = clamp(numBits, 0, 32 - startBit);
   if (numBits > 0) {
-    uint mask = ((1u << (uint)numBits) - 1u) << (uint)startBit;
+    uint mask = (0xFFFFFFFFu >> (32u - (uint)numBits)) << (uint)startBit;
     bm |= mask;
   }
   return bm;

@@ -1063,7 +1063,7 @@ void frag_main()
     float3 _2130;
     float3 _2131;
     [branch]
-    if (_9_m23.x != 0.0f)
+    if ((_9_m23.x != 0.0f) || (RENODX_IMPROVED_GTAO != 0.0f))
     {
         float _2106 = min(_21.SampleBias(_12, _4, _9_m16).x, _402);
         _2130 = clamp((pow(abs(_536 + _2106), exp2(((-16.0f) * _526) - 1.0f)) - 1.0f) + _2106, 0.0f, 1.0f).xxx;
@@ -1074,6 +1074,7 @@ void frag_main()
         _2130 = _2095;
         _2131 = _2095;
     }
+    _2093 *= (RENODX_IMPROVED_GTAO != 0.0f) ? _2130 : 1.0f.xxx;
     float3 _2154;
     do
     {
