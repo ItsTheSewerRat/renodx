@@ -44,23 +44,51 @@ PFN_vkCreateSwapchainKHR real_vk_create_swapchain = nullptr;
 PFN_vkCmdSetScissorWithCount vk_cmd_set_scissor_with_count = nullptr;
 bool vulkan_swapchain_hook_installed = false;
 std::atomic_bool vfx_boost_tracking_enabled = false;
+std::atomic_bool vfx_discovery_cache_active = false;
+std::atomic_bool vfx_readback_work_pending = false;
 std::atomic_uint32_t vulkan_swapchain_width = 0u;
 std::atomic_uint32_t vulkan_swapchain_height = 0u;
 std::once_flag vfx_readback_failure_log_once;
 
-std::shared_mutex vulkan_descriptor_mutex;
-std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t>>
-    vulkan_descriptor_images;
-std::unordered_map<uint64_t, uint64_t> vulkan_graphics_descriptor_set_1;
-std::unordered_map<uint64_t, std::unordered_map<uint64_t, uint64_t>>
-    vulkan_graphics_push_images_set_1;
+constexpr size_t kVfxTextureBindingCount = 3u;
+using VfxTextureViews = std::array<uint64_t, kVfxTextureBindingCount>;
 
-uint64_t GetVulkanDescriptorSlotKey(uint32_t binding, uint32_t array_element) {
-  return (static_cast<uint64_t>(binding) << 32u) | array_element;
+std::shared_mutex vulkan_descriptor_mutex;
+std::unordered_map<uint64_t, VfxTextureViews> vulkan_descriptor_images;
+std::unordered_map<uint64_t, uint64_t> vulkan_graphics_descriptor_set_1;
+std::unordered_map<uint64_t, VfxTextureViews> vulkan_graphics_push_images_set_1;
+
+size_t GetTrackedVfxTextureBindingIndex(uint32_t binding) {
+  switch (binding) {
+    case 2u: return 0u;
+    case 4u: return 1u;
+    case 8u: return 2u;
+    default: return kVfxTextureBindingCount;
+  }
 }
 
 bool IsTrackedVfxTextureBinding(uint32_t binding) {
-  return binding == 2u || binding == 4u || binding == 8u;
+  return GetTrackedVfxTextureBindingIndex(binding) != kVfxTextureBindingCount;
+}
+
+void UpdateTrackedVfxTextureView(
+    std::unordered_map<uint64_t, VfxTextureViews>* texture_views,
+    uint64_t owner,
+    size_t binding_index,
+    uint64_t image_view) {
+  if (image_view != 0u) {
+    (*texture_views)[owner][binding_index] = image_view;
+    return;
+  }
+
+  const auto owner_views = texture_views->find(owner);
+  if (owner_views == texture_views->end()) return;
+  owner_views->second[binding_index] = 0u;
+  if (std::ranges::all_of(
+          owner_views->second,
+          [](uint64_t view) { return view == 0u; })) {
+    texture_views->erase(owner_views);
+  }
 }
 
 HMODULE GetReshadeVulkanModule() {
@@ -134,7 +162,6 @@ void OnBindVfxDescriptorTables(
     uint32_t count,
     const reshade::api::descriptor_table* tables) {
   if (stages != reshade::api::shader_stage::all_graphics
-      || !vfx_boost_tracking_enabled.load(std::memory_order_relaxed)
       || first > 1u
       || first + count <= 1u) {
     return;
@@ -154,7 +181,6 @@ void OnPushVfxDescriptors(
     uint32_t set,
     const reshade::api::descriptor_table_update& update) {
   if (stages != reshade::api::shader_stage::all_graphics
-      || !vfx_boost_tracking_enabled.load(std::memory_order_relaxed)
       || set != 1u
       || !IsTrackedVfxTextureBinding(update.binding)
       || update.array_offset != 0u
@@ -177,41 +203,26 @@ void OnPushVfxDescriptors(
       : static_cast<const reshade::api::sampler_with_resource_view*>(
             update.descriptors)[0]
             .view.handle;
-  const uint64_t slot = GetVulkanDescriptorSlotKey(update.binding, 0u);
-  if (image_view != 0u) {
-    images[slot] = image_view;
-  } else {
-    images.erase(slot);
+  images[GetTrackedVfxTextureBindingIndex(update.binding)] = image_view;
+  if (image_view == 0u
+      && std::ranges::all_of(images, [](uint64_t view) { return view == 0u; })) {
+    vulkan_graphics_push_images_set_1.erase(command_buffer);
   }
 }
 
-// ReShade emits both regular and descriptor-template updates through this event
-// with the destination descriptor table intact.
+// Cache bindings while disabled because Vulkan cannot query them later.
 bool OnUpdateVfxDescriptorTables(
     reshade::api::device*,
     uint32_t count,
     const reshade::api::descriptor_table_update* updates) {
-  bool has_tracked_descriptors = false;
-  for (uint32_t i = 0u; i < count; ++i) {
-    if (IsTrackedVfxTextureBinding(updates[i].binding)
-        && updates[i].array_offset == 0u
-        && updates[i].count != 0u
-        && (updates[i].type
-                == reshade::api::descriptor_type::texture_shader_resource_view
-            || updates[i].type
-                == reshade::api::descriptor_type::sampler_with_resource_view)) {
-      has_tracked_descriptors = true;
-      break;
-    }
-  }
-  if (!has_tracked_descriptors) return false;
-
-  const std::lock_guard lock(vulkan_descriptor_mutex);
+  std::unique_lock lock(vulkan_descriptor_mutex, std::defer_lock);
   for (uint32_t i = 0u; i < count; ++i) {
     const auto& update = updates[i];
+    const size_t binding_index =
+        GetTrackedVfxTextureBindingIndex(update.binding);
     if (update.table.handle == 0u
         || update.descriptors == nullptr
-        || !IsTrackedVfxTextureBinding(update.binding)
+        || binding_index == kVfxTextureBindingCount
         || update.array_offset != 0u
         || update.count == 0u
         || (update.type != reshade::api::descriptor_type::texture_shader_resource_view
@@ -219,19 +230,18 @@ bool OnUpdateVfxDescriptorTables(
       continue;
     }
 
+    if (!lock.owns_lock()) lock.lock();
     const uint64_t image_view = update.type
             == reshade::api::descriptor_type::texture_shader_resource_view
         ? static_cast<const reshade::api::resource_view*>(update.descriptors)[0].handle
         : static_cast<const reshade::api::sampler_with_resource_view*>(
               update.descriptors)[0]
               .view.handle;
-    auto& images = vulkan_descriptor_images[update.table.handle];
-    const uint64_t slot = GetVulkanDescriptorSlotKey(update.binding, 0u);
-    if (image_view != 0u) {
-      images[slot] = image_view;
-    } else {
-      images.erase(slot);
-    }
+    UpdateTrackedVfxTextureView(
+        &vulkan_descriptor_images,
+        update.table.handle,
+        binding_index,
+        image_view);
   }
   return false;
 }
@@ -240,21 +250,12 @@ bool OnCopyVfxDescriptorTables(
     reshade::api::device*,
     uint32_t count,
     const reshade::api::descriptor_table_copy* copies) {
-  bool has_tracked_descriptors = false;
-  for (uint32_t i = 0u; i < count; ++i) {
-    if (IsTrackedVfxTextureBinding(copies[i].dest_binding)
-        && copies[i].dest_array_offset == 0u
-        && copies[i].count != 0u) {
-      has_tracked_descriptors = true;
-      break;
-    }
-  }
-  if (!has_tracked_descriptors) return false;
-
-  const std::lock_guard lock(vulkan_descriptor_mutex);
+  std::unique_lock lock(vulkan_descriptor_mutex, std::defer_lock);
   for (uint32_t i = 0u; i < count; ++i) {
     const auto& copy = copies[i];
-    if (!IsTrackedVfxTextureBinding(copy.dest_binding)
+    const size_t dest_binding_index =
+        GetTrackedVfxTextureBindingIndex(copy.dest_binding);
+    if (dest_binding_index == kVfxTextureBindingCount
         || copy.dest_array_offset != 0u
         || copy.count == 0u
         || copy.source_table.handle == 0u
@@ -262,21 +263,22 @@ bool OnCopyVfxDescriptorTables(
       continue;
     }
 
+    if (!lock.owns_lock()) lock.lock();
     uint64_t copied_view = 0u;
+    const size_t source_binding_index =
+        GetTrackedVfxTextureBindingIndex(copy.source_binding);
     const auto source_set = vulkan_descriptor_images.find(copy.source_table.handle);
-    if (source_set != vulkan_descriptor_images.end()) {
-      const auto source = source_set->second.find(GetVulkanDescriptorSlotKey(
-          copy.source_binding, copy.source_array_offset));
-      if (source != source_set->second.end()) copied_view = source->second;
+    if (source_set != vulkan_descriptor_images.end()
+        && source_binding_index != kVfxTextureBindingCount
+        && copy.source_array_offset == 0u) {
+      copied_view = source_set->second[source_binding_index];
     }
 
-    auto& dest_set = vulkan_descriptor_images[copy.dest_table.handle];
-    const uint64_t slot = GetVulkanDescriptorSlotKey(copy.dest_binding, 0u);
-    if (copied_view != 0u) {
-      dest_set[slot] = copied_view;
-    } else {
-      dest_set.erase(slot);
-    }
+    UpdateTrackedVfxTextureView(
+        &vulkan_descriptor_images,
+        copy.dest_table.handle,
+        dest_binding_index,
+        copied_view);
   }
   return false;
 }
@@ -462,80 +464,139 @@ void ApplySwapChainEncodingTarget(float encoding_value) {
   swap_chain_target_sync_pending = true;
 }
 
-// Helper to update resolution-based uniform variables in ReShade effects
-void UpdateReshadeResolutionUniforms(reshade::api::effect_runtime* runtime, uint32_t width, uint32_t height) {
-  float fwidth = static_cast<float>(width);
-  float fheight = static_cast<float>(height);
+enum class ResolutionUniformSource : uint8_t {
+  WIDTH,
+  HEIGHT,
+  RECIPROCAL_WIDTH,
+  RECIPROCAL_HEIGHT,
+  PIXEL_SIZE,
+  SCREEN_SIZE,
+};
 
-  // Enumerate all uniform variables and update those with resolution-related source annotations
-  runtime->enumerate_uniform_variables(nullptr, [fwidth, fheight](reshade::api::effect_runtime* rt, reshade::api::effect_uniform_variable variable) {
-    char source[64] = {};
-    if (rt->get_annotation_string_from_uniform_variable(variable, "source", source)) {
-      // Update BUFFER_WIDTH uniform
-      if (std::strcmp(source, "bufwidth") == 0) {
-        rt->set_uniform_value_float(variable, fwidth);
-      }
-      // Update BUFFER_HEIGHT uniform
-      else if (std::strcmp(source, "bufheight") == 0) {
-        rt->set_uniform_value_float(variable, fheight);
-      }
-      // Update reciprocal width (1.0 / BUFFER_WIDTH)
-      else if (std::strcmp(source, "rcpwidth") == 0 || std::strcmp(source, "bufwidth_rcp") == 0) {
-        rt->set_uniform_value_float(variable, 1.0f / fwidth);
-      }
-      // Update reciprocal height (1.0 / BUFFER_HEIGHT)
-      else if (std::strcmp(source, "rcpheight") == 0 || std::strcmp(source, "bufheight_rcp") == 0) {
-        rt->set_uniform_value_float(variable, 1.0f / fheight);
-      }
-      // Update BUFFER_RCP_WIDTH (alternative naming convention)
-      else if (std::strcmp(source, "buffer_rcp_width") == 0) {
-        rt->set_uniform_value_float(variable, 1.0f / fwidth);
-      }
-      // Update BUFFER_RCP_HEIGHT (alternative naming convention)
-      else if (std::strcmp(source, "buffer_rcp_height") == 0) {
-        rt->set_uniform_value_float(variable, 1.0f / fheight);
-      }
-      // Update pixel size (float2 with 1/width, 1/height)
-      else if (std::strcmp(source, "pixelsize") == 0) {
-        float pixel_size[2] = { 1.0f / fwidth, 1.0f / fheight };
-        rt->set_uniform_value_float(variable, pixel_size, 2);
-      }
-      // Update screen size (float2 with width, height)
-      else if (std::strcmp(source, "screensize") == 0) {
-        float screen_size[2] = { fwidth, fheight };
-        rt->set_uniform_value_float(variable, screen_size, 2);
-      }
-    }
-  });
+struct ResolutionUniformBinding {
+  reshade::api::effect_uniform_variable variable = {0u};
+  ResolutionUniformSource source = ResolutionUniformSource::WIDTH;
+};
+
+struct ResolutionUniformCache {
+  std::vector<ResolutionUniformBinding> bindings;
+  uint32_t width = 0u;
+  uint32_t height = 0u;
+  bool initialized = false;
+};
+
+std::mutex resolution_uniform_cache_mutex;
+std::unordered_map<reshade::api::effect_runtime*, ResolutionUniformCache>
+    resolution_uniform_caches;
+
+void InvalidateReshadeResolutionUniformCache(
+    reshade::api::effect_runtime* runtime) {
+  const std::lock_guard lock(resolution_uniform_cache_mutex);
+  resolution_uniform_caches.erase(runtime);
 }
 
-// Flag to track if we're currently executing our bypass render
-// This prevents ReShade from rendering during normal present while allowing our bypass to work
+void UpdateReshadeResolutionUniforms(
+    reshade::api::effect_runtime* runtime,
+    uint32_t width,
+    uint32_t height) {
+  if (width == 0u || height == 0u) return;
+
+  const std::lock_guard lock(resolution_uniform_cache_mutex);
+  auto& cache = resolution_uniform_caches[runtime];
+  if (!cache.initialized) {
+    runtime->enumerate_uniform_variables(
+        nullptr,
+        [&cache](
+            reshade::api::effect_runtime* rt,
+            reshade::api::effect_uniform_variable variable) {
+          char source[64] = {};
+          if (!rt->get_annotation_string_from_uniform_variable(
+                  variable, "source", source)) {
+            return;
+          }
+
+          ResolutionUniformSource uniform_source;
+          if (std::strcmp(source, "bufwidth") == 0) {
+            uniform_source = ResolutionUniformSource::WIDTH;
+          } else if (std::strcmp(source, "bufheight") == 0) {
+            uniform_source = ResolutionUniformSource::HEIGHT;
+          } else if (std::strcmp(source, "rcpwidth") == 0
+                     || std::strcmp(source, "bufwidth_rcp") == 0
+                     || std::strcmp(source, "buffer_rcp_width") == 0) {
+            uniform_source = ResolutionUniformSource::RECIPROCAL_WIDTH;
+          } else if (std::strcmp(source, "rcpheight") == 0
+                     || std::strcmp(source, "bufheight_rcp") == 0
+                     || std::strcmp(source, "buffer_rcp_height") == 0) {
+            uniform_source = ResolutionUniformSource::RECIPROCAL_HEIGHT;
+          } else if (std::strcmp(source, "pixelsize") == 0) {
+            uniform_source = ResolutionUniformSource::PIXEL_SIZE;
+          } else if (std::strcmp(source, "screensize") == 0) {
+            uniform_source = ResolutionUniformSource::SCREEN_SIZE;
+          } else {
+            return;
+          }
+          cache.bindings.push_back({
+              .variable = variable,
+              .source = uniform_source,
+          });
+        });
+    cache.initialized = true;
+  }
+
+  if (cache.width == width && cache.height == height) return;
+  cache.width = width;
+  cache.height = height;
+
+  const float dimensions[2] = {
+      static_cast<float>(width),
+      static_cast<float>(height),
+  };
+  const float reciprocals[2] = {
+      1.f / dimensions[0],
+      1.f / dimensions[1],
+  };
+  for (const auto& binding : cache.bindings) {
+    switch (binding.source) {
+      case ResolutionUniformSource::WIDTH:
+        runtime->set_uniform_value_float(binding.variable, dimensions[0]);
+        break;
+      case ResolutionUniformSource::HEIGHT:
+        runtime->set_uniform_value_float(binding.variable, dimensions[1]);
+        break;
+      case ResolutionUniformSource::RECIPROCAL_WIDTH:
+        runtime->set_uniform_value_float(binding.variable, reciprocals[0]);
+        break;
+      case ResolutionUniformSource::RECIPROCAL_HEIGHT:
+        runtime->set_uniform_value_float(binding.variable, reciprocals[1]);
+        break;
+      case ResolutionUniformSource::PIXEL_SIZE:
+        runtime->set_uniform_value_float(binding.variable, reciprocals, 2u);
+        break;
+      case ResolutionUniformSource::SCREEN_SIZE:
+        runtime->set_uniform_value_float(binding.variable, dimensions, 2u);
+        break;
+    }
+  }
+}
+
 static bool bypass_render_active = false;
 
-// Deferred Tech Test preset application (avoids crash from UpdateSetting inside on_change_value)
-static int pending_tech_test_preset = -1;  // -1 = none, 0 = restore defaults, 1 = apply tech test
-static float prev_tech_test_look = -1.f;   // impossible initial value forces first-frame detection
+static int pending_tech_test_preset = -1;
+static float prev_tech_test_look = -1.f;
 
-// Callback to disable effects during normal present when bypass is enabled
-// This prevents double-rendering (once via bypass, once via normal present)
 void OnReshadeBeginEffects(reshade::api::effect_runtime* runtime,
                            reshade::api::command_list* cmd_list,
                            reshade::api::resource_view rtv,
                            reshade::api::resource_view rtv_srgb) {
-  // Only intercept if bypass is enabled AND we're not currently in bypass render
-  // When bypass is disabled (current_render_reshade_before_ui == 0), let ReShade render normally
   if (current_render_reshade_before_ui != 0.f && !bypass_render_active) {
     runtime->set_effects_state(false);
   }
 }
 
-// Callback to re-enable effects after present (keeps effects available for bypass)
 void OnReshadeFinishEffects(reshade::api::effect_runtime* runtime,
                             reshade::api::command_list* cmd_list,
                             reshade::api::resource_view rtv,
                             reshade::api::resource_view rtv_srgb) {
-  // Only re-enable if bypass is enabled AND we disabled them
   if (current_render_reshade_before_ui != 0.f && !bypass_render_active) {
     runtime->set_effects_state(true);
   }
@@ -549,16 +610,13 @@ bool ExecuteReshadeEffects(reshade::api::command_list* cmd_list) {
   if (cmd_list_data == nullptr) return true;
   if (cmd_list_data->current_render_targets.empty()) return true;
 
-  // Get the ORIGINAL RTV from deferred lighting - do NOT use the clone here
-  // The clone is at swapchain resolution (e.g., 3840x2160) but we want to render
-  // ReShade effects at the pre-upscale resolution
+  // Render effects at the original pre-upscale target.
   auto rtv0 = cmd_list_data->current_render_targets[0];
   if (rtv0.handle == 0) return true;
   auto* device = cmd_list->get_device();
   auto* data = renodx::utils::data::Get<renodx::utils::swapchain::DeviceData>(device);
   if (data == nullptr) return true;
 
-  // Get the render target resolution
   auto resource = device->get_resource_from_view(rtv0);
   auto resource_desc = device->get_resource_desc(resource);
   uint32_t rtv_width = resource_desc.texture.width;
@@ -576,16 +634,14 @@ bool ExecuteReshadeEffects(reshade::api::command_list* cmd_list) {
   return true;
 }
 
-// Hotkey state tracking
 bool ui_toggle_key_was_pressed = false;
 int ui_toggle_hotkey = 0;
 bool hotkey_input_active = false;
 
-// Heuristic tracking for UID UI
 bool is_ping_input_candidate = false;
 bool is_ping_drawn = false;
 bool is_uid_input_candidate = false;
-uint32_t draw_call_vertex_count = 0;  // Track vertex count from draw calls (not draw_indexed)
+uint32_t draw_call_vertex_count = 0;
 
 struct VfxBoostMatch {
   uint32_t shader_crc;
@@ -602,6 +658,8 @@ constexpr std::array vfx_boost_matches = {
 
 std::shared_mutex vfx_texture_mutex;
 std::unordered_map<uint64_t, uint32_t> vfx_texture_crcs;
+std::unordered_map<uint64_t, uint32_t> vfx_resource_crcs;
+std::unordered_map<uint64_t, uint64_t> vfx_view_resources;
 std::array<uint32_t, vfx_boost_matches.size()> vfx_match_view_counts = {};
 std::mutex vfx_readback_mutex;
 std::unordered_set<uint64_t> vfx_readback_seen;
@@ -613,6 +671,7 @@ struct VfxReadbackState {
   reshade::api::fence fence = {0u};
   uint64_t fence_value = 0u;
   uint64_t image_view = 0u;
+  reshade::api::resource resource = {0u};
   reshade::api::resource_desc desc = {};
   uint32_t row_pitch = 0u;
   uint32_t slice_pitch = 0u;
@@ -635,14 +694,13 @@ void SetVfxBoostTrackingEnabled(bool enabled) {
       vfx_readback_seen.erase(image_view);
     }
     vfx_pending_readbacks.clear();
+    if (vfx_readback_state.image_view == 0u) {
+      vfx_readback_work_pending.store(false, std::memory_order_relaxed);
+    }
   }
-  const std::lock_guard lock(vulkan_descriptor_mutex);
-  vulkan_graphics_descriptor_set_1.clear();
-  vulkan_graphics_push_images_set_1.clear();
 }
 
-void OnResetVfxCommandList(reshade::api::command_list* cmd_list) {
-  if (!vfx_boost_tracking_enabled.load(std::memory_order_relaxed)) return;
+void ClearVfxCommandListDescriptors(reshade::api::command_list* cmd_list) {
   const uint64_t command_buffer = reinterpret_cast<uint64_t>(
       reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
   const std::lock_guard lock(vulkan_descriptor_mutex);
@@ -655,7 +713,8 @@ bool IsVfxTextureDesc(const reshade::api::resource_desc& desc) {
       && (desc.texture.format == reshade::api::format::bc7_unorm
           || desc.texture.format == reshade::api::format::bc7_unorm_srgb)
       && desc.texture.width == 256u
-      && desc.texture.height == 256u;
+      && desc.texture.height == 256u
+      && desc.texture.depth_or_layers == 1u;
 }
 
 bool ComputeVfxTextureCrc(
@@ -693,9 +752,103 @@ bool ComputeVfxTextureCrc(
   return true;
 }
 
+void CacheVfxTextureCrc(
+    reshade::api::resource_view view,
+    reshade::api::resource resource,
+    uint32_t texture_crc) {
+  if (view.handle == 0u || resource.handle == 0u) return;
+
+  vfx_discovery_cache_active.store(true, std::memory_order_relaxed);
+  const std::lock_guard lock(vfx_texture_mutex);
+  if (vfx_texture_crcs.contains(view.handle)) return;
+  vfx_resource_crcs.try_emplace(resource.handle, texture_crc);
+  vfx_view_resources[view.handle] = resource.handle;
+  vfx_texture_crcs.emplace(view.handle, texture_crc);
+  for (size_t i = 0u; i < vfx_boost_matches.size(); ++i) {
+    if (texture_crc == vfx_boost_matches[i].texture_crc) {
+      ++vfx_match_view_counts[i];
+      break;
+    }
+  }
+}
+
+void RemoveCachedVfxTextureViewLocked(uint64_t image_view) {
+  const auto cached_crc = vfx_texture_crcs.find(image_view);
+  if (cached_crc != vfx_texture_crcs.end()) {
+    for (size_t i = 0u; i < vfx_boost_matches.size(); ++i) {
+      if (cached_crc->second == vfx_boost_matches[i].texture_crc) {
+        if (vfx_match_view_counts[i] != 0u) --vfx_match_view_counts[i];
+        break;
+      }
+    }
+    vfx_texture_crcs.erase(cached_crc);
+  }
+  vfx_view_resources.erase(image_view);
+}
+
+bool TryCacheVfxTextureCrc(
+    reshade::api::device* device,
+    reshade::api::resource_view view) {
+  const auto resource = device->get_resource_from_view(view);
+  if (resource.handle == 0u) return false;
+  const auto desc = device->get_resource_desc(resource);
+  const auto view_desc = device->get_resource_view_desc(view);
+  if (!IsVfxTextureDesc(desc)
+      || view_desc.texture.first_level != 0u
+      || view_desc.texture.first_layer != 0u) {
+    return false;
+  }
+
+  uint32_t cached_resource_crc = 0u;
+  bool has_cached_resource_crc = false;
+  {
+    const std::shared_lock lock(vfx_texture_mutex);
+    if (vfx_texture_crcs.contains(view.handle)) return true;
+    const auto cached_resource = vfx_resource_crcs.find(resource.handle);
+    if (cached_resource != vfx_resource_crcs.end()) {
+      cached_resource_crc = cached_resource->second;
+      has_cached_resource_crc = true;
+    }
+  }
+  if (has_cached_resource_crc) {
+    CacheVfxTextureCrc(view, resource, cached_resource_crc);
+    return true;
+  }
+
+  auto upload =
+      renodx::utils::resource::GetInitialUploadSignature(resource);
+  if (!upload.has_value()) {
+    upload = renodx::utils::resource::GetLatestUploadSignature(resource);
+  }
+  if (!upload.has_value()
+      || upload->subresource != 0u
+      || upload->width != 256u
+      || upload->height != 256u
+      || (upload->format != reshade::api::format::bc7_unorm
+          && upload->format != reshade::api::format::bc7_unorm_srgb)) {
+    return false;
+  }
+  const uint32_t expected_row_pitch =
+      reshade::api::format_row_pitch(upload->format, upload->width);
+  const uint32_t expected_slice_pitch = reshade::api::format_slice_pitch(
+      upload->format, expected_row_pitch, upload->height);
+  if (upload->row_pitch != expected_row_pitch
+      || upload->slice_pitch != expected_slice_pitch) {
+    return false;
+  }
+
+  CacheVfxTextureCrc(view, resource, upload->crc32);
+  return true;
+}
+
 void OnDestroyVfxResourceView(
     reshade::api::device*,
     reshade::api::resource_view view) {
+  if (!vfx_discovery_cache_active.load(std::memory_order_relaxed)
+      && !vfx_readback_work_pending.load(std::memory_order_relaxed)) {
+    return;
+  }
+
   {
     const std::lock_guard lock(vfx_readback_mutex);
     vfx_readback_seen.erase(view.handle);
@@ -703,42 +856,70 @@ void OnDestroyVfxResourceView(
     if (vfx_readback_state.image_view == view.handle) {
       vfx_readback_state.canceled = true;
     }
+    if (vfx_pending_readbacks.empty()
+        && vfx_readback_state.image_view == 0u) {
+      vfx_readback_work_pending.store(false, std::memory_order_relaxed);
+    }
   }
 
   const std::lock_guard lock(vfx_texture_mutex);
-  const auto cached_crc = vfx_texture_crcs.find(view.handle);
-  if (cached_crc == vfx_texture_crcs.end()) return;
-  for (size_t i = 0u; i < vfx_boost_matches.size(); ++i) {
-    if (cached_crc->second == vfx_boost_matches[i].texture_crc) {
-      if (vfx_match_view_counts[i] != 0u) --vfx_match_view_counts[i];
-      break;
+  RemoveCachedVfxTextureViewLocked(view.handle);
+}
+
+void OnDestroyVfxResource(
+    reshade::api::device*,
+    reshade::api::resource resource) {
+  if (!vfx_discovery_cache_active.load(std::memory_order_relaxed)
+      && !vfx_readback_work_pending.load(std::memory_order_relaxed)) {
+    return;
+  }
+
+  {
+    const std::lock_guard lock(vfx_readback_mutex);
+    if (vfx_readback_state.resource.handle == resource.handle) {
+      vfx_readback_state.canceled = true;
     }
   }
-  vfx_texture_crcs.erase(cached_crc);
+
+  const std::lock_guard lock(vfx_texture_mutex);
+  std::vector<uint64_t> destroyed_views;
+  for (const auto& [image_view, cached_resource] : vfx_view_resources) {
+    if (cached_resource == resource.handle) {
+      destroyed_views.push_back(image_view);
+    }
+  }
+  for (const uint64_t image_view : destroyed_views) {
+    RemoveCachedVfxTextureViewLocked(image_view);
+  }
+  vfx_resource_crcs.erase(resource.handle);
+  if (vfx_texture_crcs.empty()
+      && vfx_resource_crcs.empty()
+      && vfx_view_resources.empty()) {
+    vfx_discovery_cache_active.store(false, std::memory_order_relaxed);
+  }
 }
 
 reshade::api::resource_view GetBoundVfxTextureView(
     reshade::api::command_list* cmd_list,
     uint32_t binding) {
+  const size_t binding_index = GetTrackedVfxTextureBindingIndex(binding);
+  if (binding_index == kVfxTextureBindingCount) return {0u};
+
   const uint64_t command_buffer = reinterpret_cast<uint64_t>(
       reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
-  const uint64_t descriptor_slot = GetVulkanDescriptorSlotKey(binding, 0u);
   const std::shared_lock lock(vulkan_descriptor_mutex);
 
   const auto pushed = vulkan_graphics_push_images_set_1.find(command_buffer);
-  if (pushed != vulkan_graphics_push_images_set_1.end()) {
-    const auto image = pushed->second.find(descriptor_slot);
-    if (image != pushed->second.end()) return {image->second};
+  if (pushed != vulkan_graphics_push_images_set_1.end()
+      && pushed->second[binding_index] != 0u) {
+    return {pushed->second[binding_index]};
   }
 
   const auto bound_set = vulkan_graphics_descriptor_set_1.find(command_buffer);
   if (bound_set == vulkan_graphics_descriptor_set_1.end()) return {0u};
   const auto descriptors = vulkan_descriptor_images.find(bound_set->second);
   if (descriptors == vulkan_descriptor_images.end()) return {0u};
-  const auto image = descriptors->second.find(descriptor_slot);
-  return image != descriptors->second.end()
-      ? reshade::api::resource_view{image->second}
-      : reshade::api::resource_view{0u};
+  return {descriptors->second[binding_index]};
 }
 
 bool AreAllVfxBoostTexturesResolved() {
@@ -749,9 +930,14 @@ bool AreAllVfxBoostTexturesResolved() {
       [](uint32_t count) { return count != 0u; });
 }
 
-void QueueVfxTextureReadback(reshade::api::resource_view view) {
+void QueueVfxTextureReadback(
+    reshade::api::device* device,
+    reshade::api::resource_view view) {
   if (view.handle == 0u
-      || !vfx_boost_tracking_enabled.load(std::memory_order_relaxed)
+      || !vfx_boost_tracking_enabled.load(std::memory_order_relaxed)) {
+    return;
+  }
+  if (TryCacheVfxTextureCrc(device, view)
       || AreAllVfxBoostTexturesResolved()) {
     return;
   }
@@ -761,16 +947,22 @@ void QueueVfxTextureReadback(reshade::api::resource_view view) {
   if (vfx_pending_readbacks.size() >= kMaxPendingReadbacks) return;
   if (!vfx_readback_seen.emplace(view.handle).second) return;
   vfx_pending_readbacks.push_back(view.handle);
+  vfx_readback_work_pending.store(true, std::memory_order_relaxed);
 }
 
 void ProcessPendingVfxTextureReadback(reshade::api::command_queue* queue) {
+  if (!vfx_readback_work_pending.load(std::memory_order_relaxed)) return;
+
   auto* device = queue->get_device();
   const std::lock_guard lock(vfx_readback_mutex);
   if (vfx_readback_state.device != nullptr
       && vfx_readback_state.device != device) {
     return;
   }
-  if (vfx_readback_state.failed) return;
+  if (vfx_readback_state.failed) {
+    vfx_readback_work_pending.store(false, std::memory_order_relaxed);
+    return;
+  }
 
   if (vfx_readback_state.image_view != 0u) {
     if (device->get_completed_fence_value(vfx_readback_state.fence)
@@ -803,34 +995,29 @@ void ProcessPendingVfxTextureReadback(reshade::api::command_queue* queue) {
         device->unmap_buffer_region(vfx_readback_state.intermediate);
 
         if (!all_zero && computed) {
-          const std::lock_guard texture_lock(vfx_texture_mutex);
-          const bool inserted = vfx_texture_crcs
-                                    .emplace(
-                                        vfx_readback_state.image_view,
-                                        texture_crc)
-                                    .second;
-          if (inserted) {
-            for (size_t i = 0u; i < vfx_boost_matches.size(); ++i) {
-              if (texture_crc == vfx_boost_matches[i].texture_crc) {
-                ++vfx_match_view_counts[i];
-                break;
-              }
-            }
-          }
+          CacheVfxTextureCrc(
+              {vfx_readback_state.image_view},
+              vfx_readback_state.resource,
+              texture_crc);
         }
       }
     }
 
     vfx_readback_state.image_view = 0u;
+    vfx_readback_state.resource = {0u};
     vfx_readback_state.canceled = false;
   }
 
-  if (!vfx_boost_tracking_enabled.load(std::memory_order_relaxed)) return;
+  if (!vfx_boost_tracking_enabled.load(std::memory_order_relaxed)) {
+    vfx_readback_work_pending.store(false, std::memory_order_relaxed);
+    return;
+  }
   if (AreAllVfxBoostTexturesResolved()) {
     for (const uint64_t image_view : vfx_pending_readbacks) {
       vfx_readback_seen.erase(image_view);
     }
     vfx_pending_readbacks.clear();
+    vfx_readback_work_pending.store(false, std::memory_order_relaxed);
     return;
   }
 
@@ -862,6 +1049,8 @@ void ProcessPendingVfxTextureReadback(reshade::api::command_queue* queue) {
       reshade::api::fence fence = {0u};
       if (!device->create_fence(
               0u, reshade::api::fence_flags::none, &fence)) {
+        vfx_readback_state.failed = true;
+        vfx_readback_work_pending.store(false, std::memory_order_relaxed);
         return;
       }
       vfx_readback_state.device = device;
@@ -876,11 +1065,17 @@ void ProcessPendingVfxTextureReadback(reshade::api::command_queue* queue) {
             nullptr,
             reshade::api::resource_usage::copy_dest,
             &vfx_readback_state.intermediate)) {
+      vfx_readback_state.failed = true;
+      vfx_readback_work_pending.store(false, std::memory_order_relaxed);
       return;
     }
 
     auto* cmd_list = queue->get_immediate_command_list();
-    if (cmd_list == nullptr) return;
+    if (cmd_list == nullptr) {
+      vfx_readback_seen.erase(image_view);
+      vfx_readback_work_pending.store(false, std::memory_order_relaxed);
+      return;
+    }
     cmd_list->barrier(
         resource,
         reshade::api::resource_usage::shader_resource,
@@ -900,6 +1095,7 @@ void ProcessPendingVfxTextureReadback(reshade::api::command_queue* queue) {
     queue->flush_immediate_command_list();
 
     vfx_readback_state.image_view = image_view;
+    vfx_readback_state.resource = resource;
     vfx_readback_state.desc = desc;
     vfx_readback_state.row_pitch = row_pitch;
     vfx_readback_state.slice_pitch = slice_pitch;
@@ -909,7 +1105,9 @@ void ProcessPendingVfxTextureReadback(reshade::api::command_queue* queue) {
             vfx_readback_state.fence,
             vfx_readback_state.fence_value)) {
       vfx_readback_state.image_view = 0u;
+      vfx_readback_state.resource = {0u};
       vfx_readback_state.failed = true;
+      vfx_readback_work_pending.store(false, std::memory_order_relaxed);
       std::call_once(vfx_readback_failure_log_once, []() {
         reshade::log::message(
             reshade::log::level::error,
@@ -918,27 +1116,36 @@ void ProcessPendingVfxTextureReadback(reshade::api::command_queue* queue) {
     }
     return;
   }
+  vfx_readback_work_pending.store(false, std::memory_order_relaxed);
 }
 
 void OnDestroyVfxDevice(reshade::api::device* device) {
+  reshade::api::resource intermediate = {0u};
+  reshade::api::fence fence = {0u};
   {
     const std::lock_guard lock(vfx_readback_mutex);
     if (vfx_readback_state.device == device) {
-      if (vfx_readback_state.intermediate.handle != 0u) {
-        device->destroy_resource(vfx_readback_state.intermediate);
-      }
-      if (vfx_readback_state.fence.handle != 0u) {
-        device->destroy_fence(vfx_readback_state.fence);
-      }
+      intermediate = vfx_readback_state.intermediate;
+      fence = vfx_readback_state.fence;
       vfx_readback_state = {};
     }
     vfx_readback_seen.clear();
     vfx_pending_readbacks.clear();
+    vfx_readback_work_pending.store(false, std::memory_order_relaxed);
+  }
+  if (intermediate.handle != 0u) {
+    device->destroy_resource(intermediate);
+  }
+  if (fence.handle != 0u) {
+    device->destroy_fence(fence);
   }
   {
     const std::lock_guard lock(vfx_texture_mutex);
     vfx_texture_crcs.clear();
+    vfx_resource_crcs.clear();
+    vfx_view_resources.clear();
     vfx_match_view_counts.fill(0u);
+    vfx_discovery_cache_active.store(false, std::memory_order_relaxed);
   }
   const std::lock_guard lock(vulkan_descriptor_mutex);
   vulkan_descriptor_images.clear();
@@ -1088,7 +1295,7 @@ bool ReplaceVFXBoostShader(
     }
   }
   if (!has_texture_crc) {
-    QueueVfxTextureReadback(texture_view);
+    QueueVfxTextureReadback(cmd_list->get_device(), texture_view);
     RestoreVFXBoostShader(cmd_list, shader_state);
     return false;
   }
@@ -1107,14 +1314,6 @@ bool ReplaceImprovedGTAOShader(reshade::api::command_list* cmd_list) {
 
 bool ReplaceDisableGTAOShader(reshade::api::command_list* cmd_list) {
   return shader_injection.disable_game_ao >= 0.5f;
-}
-
-bool UseCloudShadowOffVariant(reshade::api::command_list*) {
-  return shader_injection.fake_cloud_shadows < 0.5f;
-}
-
-bool SkipShaderInjection(reshade::api::command_list*) {
-  return false;
 }
 
 void RegisterUiVisibilityBypassShader(uint32_t crc) {
@@ -1148,7 +1347,6 @@ void RegisterUidBypassShader(uint32_t crc) {
 }
 
 
-// Helper function to get key name from virtual key code
 std::string GetKeyName(int keycode) {
   if (keycode == 0 || keycode >= 256) return "";
 
@@ -1553,7 +1751,6 @@ renodx::utils::settings::Settings settings = {
           static bool key_was_pressed = false;
           bool changed = false;
 
-          // Get current key name for display
           std::string key_name = ui_toggle_hotkey != 0 ? GetKeyName(ui_toggle_hotkey) : "";
           char buf[64] = {0};
           if (!key_name.empty()) {
@@ -1561,7 +1758,6 @@ renodx::utils::settings::Settings settings = {
             memcpy(buf, key_name.c_str(), copy_len);
           }
 
-          // Create the input text widget
           ImGui::InputTextWithHint(
               "UI Toggle Hotkey",
               "Click to set keyboard shortcut",
@@ -1570,7 +1766,6 @@ renodx::utils::settings::Settings settings = {
               ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoUndoRedo | ImGuiInputTextFlags_NoHorizontalScroll
           );
 
-          // Check if widget is active and capture key presses
           if (ImGui::IsItemActive()) {
             hotkey_input_active = true;
             int key_pressed = GetLastKeyPressedImGui();
@@ -1981,16 +2176,8 @@ void OnPresetOff() {
      renodx::utils::settings::UpdateSetting("ImprovedSSR", 0.f);
      renodx::utils::settings::UpdateSetting("ImprovedGTAO", 0.f);
      renodx::utils::settings::UpdateSetting("TechTestLook", 0.f);
-  //   renodx::utils::settings::UpdateSetting("colorGradeExposure", 1.f);
-  //   renodx::utils::settings::UpdateSetting("colorGradeHighlights", 50.f);
-  //   renodx::utils::settings::UpdateSetting("colorGradeShadows", 50.f);
-  //   renodx::utils::settings::UpdateSetting("colorGradeContrast", 50.f);
-  //   renodx::utils::settings::UpdateSetting("colorGradeSaturation", 50.f);
-  //   renodx::utils::settings::UpdateSetting("colorGradeLUTStrength", 100.f);
-  //   renodx::utils::settings::UpdateSetting("colorGradeLUTScaling", 0.f);
 }
 
-// OnDraw handler to track vertex count from draw calls
 bool OnDraw(
     reshade::api::command_list* cmd_list,
     uint32_t vertex_count,
@@ -1998,11 +2185,9 @@ bool OnDraw(
     uint32_t first_vertex,
     uint32_t first_instance) {
   draw_call_vertex_count = vertex_count;
-  shader_injection.latency_bar_draw_opacity = 1.f;
   return false;
 }
 
-// OnDrawIndexed event handler for heuristic-based ping/UID detection
 bool OnDrawIndexed(
     reshade::api::command_list* cmd_list,
     uint32_t index_count,
@@ -2010,59 +2195,63 @@ bool OnDrawIndexed(
     uint32_t first_index,
     int32_t vertex_offset,
     uint32_t first_instance) {
+  constexpr uint32_t PING_INDEX_COUNT = 18;
+  constexpr uint32_t PING_FIRST_INDEX = 0;
+  constexpr int32_t PING_VERTEX_OFFSET = 0;
+  constexpr uint32_t UID_FIRST_INDEX = 18;
+  constexpr uint32_t UID_MIN_INDEX_COUNT = 100;
+  constexpr int32_t UID_VERTEX_OFFSET = 12;
+
+  const bool ui_hidden = !IsVisible(shader_injection.ui_visibility);
+  const bool ping_geometry_candidate =
+      index_count == PING_INDEX_COUNT
+      && first_index == PING_FIRST_INDEX
+      && vertex_offset == PING_VERTEX_OFFSET;
+  const bool uid_geometry_candidate =
+      first_index == UID_FIRST_INDEX
+      && index_count > UID_MIN_INDEX_COUNT
+      && vertex_offset == UID_VERTEX_OFFSET;
+  if (!ui_hidden
+      && !ping_geometry_candidate
+      && !uid_geometry_candidate) {
+    is_ping_input_candidate = false;
+    is_uid_input_candidate = false;
+    draw_call_vertex_count = 0;
+    return false;
+  }
+
   auto* shader_state = renodx::utils::shader::GetCurrentState(cmd_list);
-  const uint32_t vertex_shader_hash = shader_state != nullptr
+  const uint32_t vertex_shader_hash =
+      shader_state != nullptr && ping_geometry_candidate
       ? renodx::utils::shader::GetCurrentVertexShaderHash(shader_state)
       : 0u;
   const uint32_t pixel_shader_hash = shader_state != nullptr
       ? renodx::utils::shader::GetCurrentPixelShaderHash(shader_state)
       : 0u;
 
-  if (!IsVisible(shader_injection.ui_visibility)
+  if (ui_hidden
       && std::ranges::find(kVulkanDirectHidePixelShaderHashes, pixel_shader_hash)
           != kVulkanDirectHidePixelShaderHashes.end()) {
     draw_call_vertex_count = 0;
     return true;
   }
 
-  // Constants for ping/latency bar detection
-  constexpr uint32_t PING_INDEX_COUNT = 18;
-  constexpr uint32_t PING_FIRST_INDEX = 0;
-  constexpr int32_t PING_VERTEX_OFFSET = 0;
-
-  // Detect ping/latency bar
-  const bool ping_geometry_candidate = (index_count == PING_INDEX_COUNT) &&
-                                       (first_index == PING_FIRST_INDEX) &&
-                                       (vertex_offset == PING_VERTEX_OFFSET);
   const bool latency_bar_draw_candidate = ping_geometry_candidate
                                           && vertex_shader_hash == kVulkanPingVertexShaderHash
                                           && pixel_shader_hash == kVulkanPingPixelShaderHash;
   is_ping_input_candidate = latency_bar_draw_candidate && (draw_call_vertex_count == 0);
-  shader_injection.latency_bar_draw_opacity = latency_bar_draw_candidate
-      ? shader_injection.ping_text_opacity
-      : 1.f;
 
   if (latency_bar_draw_candidate) {
     if (is_ping_input_candidate) {
       is_ping_drawn = true;
     }
     draw_call_vertex_count = 0;
-    return !IsVisible(shader_injection.ping_text_opacity);
+    return false;
   }
 
-  // Constants for UID text detection
-  constexpr uint32_t UID_FIRST_INDEX = 18;
-  constexpr uint32_t UID_MIN_INDEX_COUNT = 100;
-  constexpr int32_t UID_VERTEX_OFFSET = 12;
-
-  // Detect UID text after the ping or post-combat shader
-  const bool uid_geometry_candidate = (first_index == UID_FIRST_INDEX) &&
-                                      (index_count > UID_MIN_INDEX_COUNT) &&
-                                      (vertex_offset == UID_VERTEX_OFFSET);
   is_uid_input_candidate = uid_geometry_candidate
                            && (is_ping_drawn || pixel_shader_hash == kVulkanUidPixelShaderHash);
 
-  // Reset vertex count after processing
   draw_call_vertex_count = 0;
 
   if (!is_uid_input_candidate) {
@@ -2097,9 +2286,7 @@ void OnPresent(reshade::api::command_queue* queue,
   auto* device = queue->get_device();
   auto bb = device->get_resource_desc(swapchain->get_current_back_buffer());
 
-  // Vulkan output format changes become native only when the swapchain is
-  // recreated. Keep the proxy encoding on the format that is actually active
-  // so a live HDR10/scRGB/SDR selection cannot encode into the old surface.
+  // Keep proxy encoding matched to the active native surface format.
   if (bb.type != reshade::api::resource_type::unknown) {
     const auto format = reshade::api::format_to_default_typed(
         bb.texture.format, 0);
@@ -2118,11 +2305,6 @@ void OnPresent(reshade::api::command_queue* queue,
 
     if (is_format_compatible(requested_swap_chain_encoding)) {
       SetActiveSwapChainEncoding(requested_swap_chain_encoding);
-      if (swap_chain_target_sync_pending) {
-        renodx::utils::swapchain::ChangeColorSpace(
-            swapchain, GetSwapChainColorSpace(active_swap_chain_encoding));
-        swap_chain_target_sync_pending = false;
-      }
     } else {
       if (!swap_chain_output_initialized
           || !is_format_compatible(active_swap_chain_encoding)) {
@@ -2137,13 +2319,12 @@ void OnPresent(reshade::api::command_queue* queue,
       } else {
         SetActiveSwapChainEncoding(active_swap_chain_encoding);
       }
+    }
 
-      if (swap_chain_target_sync_pending) {
-        // On Vulkan this only synchronizes ReShade runtime metadata. The
-        // create_swapchain callback applies the requested native format later.
-        renodx::utils::swapchain::ChangeColorSpace(
-            swapchain, GetSwapChainColorSpace(active_swap_chain_encoding));
-      }
+    if (swap_chain_target_sync_pending) {
+      renodx::utils::swapchain::ChangeColorSpace(
+          swapchain, GetSwapChainColorSpace(active_swap_chain_encoding));
+      swap_chain_target_sync_pending = false;
     }
     swap_chain_output_initialized = true;
   } else {
@@ -2156,26 +2337,21 @@ void OnPresent(reshade::api::command_queue* queue,
     shader_injection.custom_flip_uv_y = 1.f;
   }
 
-  // Compute UI aspect ratio from swapchain for dynamic latency bar detection
   if (bb.type != reshade::api::resource_type::unknown) {
     shader_injection.ui_aspect_ratio = static_cast<float>(bb.texture.height) / static_cast<float>(bb.texture.width);
   }
 
-  // Reset heuristic tracking flags for ping/UID detection
   is_ping_input_candidate = false;
   is_uid_input_candidate = false;
   is_ping_drawn = false;
   draw_call_vertex_count = 0;
-  shader_injection.latency_bar_draw_opacity = 1.f;
 
-  // Detect Tech Test state changes from preset loads, game startup, or manual toggle
   float current_tech_test = shader_injection.tech_test_look;
   if (current_tech_test != prev_tech_test_look) {
     if (current_tech_test >= 1.f) pending_tech_test_preset = 1;
     prev_tech_test_look = current_tech_test;
   }
 
-  // Apply deferred Tech Test preset (safe context, outside settings callback)
   if (pending_tech_test_preset == 1) {
     renodx::utils::settings::UpdateSetting("GammaCorrection", 2.f);
     renodx::utils::settings::UpdateSetting("SwapChainGammaCorrection", 2.f);
@@ -2190,13 +2366,10 @@ void OnPresent(reshade::api::command_queue* queue,
     pending_tech_test_preset = -1;
   }
 
-  // Check UI visibility hotkey (skip if user is currently setting a new hotkey)
   if (ui_toggle_hotkey != 0 && !hotkey_input_active) {
     bool key_down = (GetAsyncKeyState(ui_toggle_hotkey) & 0x8000) != 0;
     if (key_down && !ui_toggle_key_was_pressed) {
-      // Toggle UI visibility
       shader_injection.ui_visibility = (shader_injection.ui_visibility == 0.f) ? 1.f : 0.f;
-      // Update the setting value to keep UI in sync
       renodx::utils::settings::UpdateSetting("UIVisibility", shader_injection.ui_visibility);
     }
     ui_toggle_key_was_pressed = key_down;
@@ -2224,7 +2397,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         renodx::mods::shader::expected_constant_buffer_index = 13;
         renodx::mods::shader::allow_multiple_push_constants = true;
         renodx::mods::shader::minimum_constant_buffer_stages =
-            reshade::api::shader_stage::pixel | reshade::api::shader_stage::compute;
+            reshade::api::shader_stage::vertex
+            | reshade::api::shader_stage::pixel
+            | reshade::api::shader_stage::compute;
         renodx::mods::shader::use_vulkan_descriptor_constant_buffer = true;
         renodx::mods::shader::vulkan_descriptor_constant_buffer_set = 4u;
         renodx::mods::shader::vulkan_descriptor_constant_buffer_binding = 0u;
@@ -2290,7 +2465,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           settings.push_back(setting);
         }
 
-        // Initialize SwapChainEncoding-related settings
         {
           float encoding_value = 4.f;  // default
           reshade::get_config_value(nullptr, renodx::utils::settings::global_name.c_str(), "SwapChainEncoding", encoding_value);
@@ -2305,8 +2479,11 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
         reshade::register_event<reshade::addon_event::present>(OnPresent);
         reshade::register_event<reshade::addon_event::reshade_begin_effects>(OnReshadeBeginEffects);
         reshade::register_event<reshade::addon_event::reshade_finish_effects>(OnReshadeFinishEffects);
+        reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(
+            InvalidateReshadeResolutionUniformCache);
+        reshade::register_event<reshade::addon_event::destroy_effect_runtime>(
+            InvalidateReshadeResolutionUniformCache);
 
-        // Load UI visibility hotkey from saved config
         {
           int saved_hotkey = 0;
           if (reshade::get_config_value(nullptr, renodx::utils::settings::global_name.c_str(), "UIVisibilityHotkey", saved_hotkey)) {
@@ -2323,8 +2500,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             .name = "Endfield full-resolution linear intermediate direct Vulkan upgrade",
         });
 
-        // Current Vulkan equivalents of the eight deferred grass/foliage
-        // passes used by the DX11 build to run ReShade before UI composition.
         constexpr std::array<uint32_t, 8> reshade_before_ui_crcs = {
             0x1D89E872u,
             0x93F0C75Cu,
@@ -2347,7 +2522,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           }
         }
 
-        // Improved GTAO shaders
         const uint32_t improved_gtao_crcs[] = {
             0x902C57D5u,  // GTAO main
             0xAC758574u,  // GTAO temporal
@@ -2366,12 +2540,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           }
         }
 
-        for (const uint32_t crc : std::array{0xD1EAE8DEu, 0x973FCE7Bu}) {
-          auto& shader = custom_shaders.at(crc);
-          shader.on_replace = UseCloudShadowOffVariant;
-          shader.on_inject = SkipShaderInjection;
-        }
-
         for (const uint32_t crc : kVulkanUiVisibilityPixelShaderHashes) {
           RegisterUiVisibilityBypassShader(crc);
         }
@@ -2384,8 +2552,12 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             };
           }
         }
-        reshade::register_event<reshade::addon_event::reset_command_list>(OnResetVfxCommandList);
+        reshade::register_event<reshade::addon_event::reset_command_list>(
+            ClearVfxCommandListDescriptors);
+        reshade::register_event<reshade::addon_event::destroy_command_list>(
+            ClearVfxCommandListDescriptors);
         reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyVfxDevice);
+        reshade::register_event<reshade::addon_event::destroy_resource>(OnDestroyVfxResource);
         reshade::register_event<reshade::addon_event::destroy_resource_view>(OnDestroyVfxResourceView);
         reshade::register_event<reshade::addon_event::update_descriptor_tables>(OnUpdateVfxDescriptorTables);
         reshade::register_event<reshade::addon_event::copy_descriptor_tables>(OnCopyVfxDescriptorTables);
@@ -2419,8 +2591,12 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       UninstallVulkanSwapchainHook();
       reshade::unregister_event<reshade::addon_event::draw>(OnDraw);
       reshade::unregister_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
-      reshade::unregister_event<reshade::addon_event::reset_command_list>(OnResetVfxCommandList);
+      reshade::unregister_event<reshade::addon_event::reset_command_list>(
+          ClearVfxCommandListDescriptors);
+      reshade::unregister_event<reshade::addon_event::destroy_command_list>(
+          ClearVfxCommandListDescriptors);
       reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyVfxDevice);
+      reshade::unregister_event<reshade::addon_event::destroy_resource>(OnDestroyVfxResource);
       reshade::unregister_event<reshade::addon_event::destroy_resource_view>(OnDestroyVfxResourceView);
       reshade::unregister_event<reshade::addon_event::update_descriptor_tables>(OnUpdateVfxDescriptorTables);
       reshade::unregister_event<reshade::addon_event::copy_descriptor_tables>(OnCopyVfxDescriptorTables);
@@ -2429,6 +2605,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
       reshade::unregister_event<reshade::addon_event::reshade_begin_effects>(OnReshadeBeginEffects);
       reshade::unregister_event<reshade::addon_event::reshade_finish_effects>(OnReshadeFinishEffects);
+      reshade::unregister_event<reshade::addon_event::reshade_reloaded_effects>(
+          InvalidateReshadeResolutionUniformCache);
+      reshade::unregister_event<reshade::addon_event::destroy_effect_runtime>(
+          InvalidateReshadeResolutionUniformCache);
       break;
   }
 
