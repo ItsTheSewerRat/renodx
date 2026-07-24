@@ -5,8 +5,6 @@
 
 #define ImTextureID ImU64
 
-// #define DEBUG_LEVEL_0
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -15,7 +13,6 @@
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
-#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -49,7 +46,6 @@ bool vulkan_swapchain_hook_installed = false;
 std::atomic_bool vfx_boost_tracking_enabled = false;
 std::atomic_uint32_t vulkan_swapchain_width = 0u;
 std::atomic_uint32_t vulkan_swapchain_height = 0u;
-std::once_flag text_split_replay_log_once;
 std::once_flag vfx_readback_failure_log_once;
 
 std::shared_mutex vulkan_descriptor_mutex;
@@ -122,13 +118,6 @@ VkResult VKAPI_CALL HookVkCreateSwapchainKHR(
     return result;
   }
 
-  std::stringstream warning;
-  warning << "[Endfield-VK] Native Vulkan color space "
-          << static_cast<int32_t>(updated_create_info.imageColorSpace)
-          << " failed with VkResult " << static_cast<int32_t>(result)
-          << "; retrying the game's color space "
-          << static_cast<int32_t>(create_info->imageColorSpace) << '.';
-  reshade::log::message(reshade::log::level::warning, warning.str().c_str());
   const VkResult retry_result = real_vk_create_swapchain(device, create_info, allocator, swapchain);
   if (retry_result >= VK_SUCCESS) {
     vulkan_swapchain_width.store(create_info->imageExtent.width, std::memory_order_relaxed);
@@ -345,9 +334,6 @@ void OnInitVulkanSwapchainHook(reshade::api::device* device) {
           "[Endfield-VK] Failed to install the native Vulkan swapchain color-space hook.");
     } else {
       vulkan_swapchain_hook_installed = true;
-      reshade::log::message(
-          reshade::log::level::info,
-          "[Endfield-VK] Installed the native Vulkan swapchain color-space hook.");
     }
   }
 
@@ -407,7 +393,6 @@ static_assert(sizeof(SwapChainInjectData) == 8u * sizeof(float));
 
 SwapChainInjectData swap_chain_injection;
 bool swap_chain_target_sync_pending = true;
-bool swap_chain_recreation_warning_emitted = false;
 bool swap_chain_output_initialized = false;
 float requested_swap_chain_encoding = 4.f;
 float active_swap_chain_encoding = 4.f;
@@ -475,7 +460,6 @@ void ApplySwapChainEncodingTarget(float encoding_value) {
   SetActiveSwapChainEncoding(
       swap_chain_output_initialized ? active_swap_chain_encoding : encoding_value);
   swap_chain_target_sync_pending = true;
-  swap_chain_recreation_warning_emitted = false;
 }
 
 // Helper to update resolution-based uniform variables in ReShade effects
@@ -524,10 +508,6 @@ void UpdateReshadeResolutionUniforms(reshade::api::effect_runtime* runtime, uint
     }
   });
 }
-
-// Track the last known RTV resolution to detect resolution changes
-static uint32_t last_rtv_width = 0;
-static uint32_t last_rtv_height = 0;
 
 // Flag to track if we're currently executing our bypass render
 // This prevents ReShade from rendering during normal present while allowing our bypass to work
@@ -586,21 +566,6 @@ bool ExecuteReshadeEffects(reshade::api::command_list* cmd_list) {
 
   const std::shared_lock lock(data->mutex);
   for (auto* runtime : data->effect_runtimes) {
-    if (rtv_width != last_rtv_width || rtv_height != last_rtv_height) {
-#ifdef DEBUG_LEVEL_0
-      uint32_t swapchain_width = 0, swapchain_height = 0;
-      runtime->get_screenshot_width_and_height(&swapchain_width, &swapchain_height);
-
-      std::stringstream ss;
-      ss << "[Endfield] ExecuteReshadeEffects: Rendering at RTV=" << rtv_width << "x" << rtv_height
-         << " (Swapchain=" << swapchain_width << "x" << swapchain_height << ")";
-      reshade::log::message(reshade::log::level::info, ss.str().c_str());
-#endif
-
-      last_rtv_width = rtv_width;
-      last_rtv_height = rtv_height;
-    }
-
     UpdateReshadeResolutionUniforms(runtime, rtv_width, rtv_height);
     bypass_render_active = true;
     runtime->set_effects_state(true);
@@ -1038,13 +1003,6 @@ bool DrawTextRegion(
       .offset = {.x = 0, .y = 0},
       .extent = {.width = width, .height = height},
   };
-
-  std::call_once(text_split_replay_log_once, [&]() {
-    std::stringstream message;
-    message << "[Endfield-VK] UID/latency text split replay active at x="
-            << split_x << " for " << width << 'x' << height << '.';
-    reshade::log::message(reshade::log::level::info, message.str().c_str());
-  });
 
   const auto native_cmd_list = reinterpret_cast<VkCommandBuffer>(cmd_list->get_native());
   vk_cmd_set_scissor_with_count(native_cmd_list, 1u, &clip_rect);
@@ -2164,7 +2122,6 @@ void OnPresent(reshade::api::command_queue* queue,
         renodx::utils::swapchain::ChangeColorSpace(
             swapchain, GetSwapChainColorSpace(active_swap_chain_encoding));
         swap_chain_target_sync_pending = false;
-        swap_chain_recreation_warning_emitted = false;
       }
     } else {
       if (!swap_chain_output_initialized
@@ -2186,12 +2143,6 @@ void OnPresent(reshade::api::command_queue* queue,
         // create_swapchain callback applies the requested native format later.
         renodx::utils::swapchain::ChangeColorSpace(
             swapchain, GetSwapChainColorSpace(active_swap_chain_encoding));
-        if (!swap_chain_recreation_warning_emitted) {
-          reshade::log::message(
-              reshade::log::level::warning,
-              "[Endfield-VK] Output format change is pending the next Vulkan swapchain recreation.");
-          swap_chain_recreation_warning_emitted = true;
-        }
       }
     }
     swap_chain_output_initialized = true;
