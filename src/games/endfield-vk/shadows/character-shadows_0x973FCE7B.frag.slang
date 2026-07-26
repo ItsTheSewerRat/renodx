@@ -317,23 +317,16 @@ void main(
     r0.w = r0.w + -r0.z;
     r0.z = cb3[36].x * r0.w + r0.z;
 
-    // Harden the base shadow before applying the independent cloud mask.
-    if (SHADOW_HARDENING >= 1.f) {
-      r0.z = r0.z * r0.z * (3.0 - 2.0 * r0.z);
-    }
-
-    // Cloud shadow (t3) — toggle via FAKE_CLOUD_SHADOWS
-    if (FAKE_CLOUD_SHADOWS >= 1.f) {
-      r0.w = cmp(0.00100000005 < r0.z);
+    r0.w = cmp(0.00100000005 < r0.z);
     if (r0.w != 0) {
       r4.xyz = -cb1[93].xyz + r2.xyz;
       r4.yw = cb1[96].xz * r4.yy + r4.xz;
       r5.xy = cb1[94].zz * r4.yw;
       r5.zw = cb1[103].ww * cb1[95].xy;
       r4.yw = r4.yw * cb1[94].zz + r5.zw;
-      r0.w = t3.SampleLevel(s2_s, r4.yw, 0).x;
+      r0.w = t3.SampleLevel(s1_s, r4.yw, 0).x;
       r4.yw = r5.xy * cb1[95].ww + r5.zw;
-      r2.w = t3.SampleLevel(s2_s, r4.yw, 0).x;
+      r2.w = t3.SampleLevel(s1_s, r4.yw, 0).x;
       r3.w = dot(r4.xz, r4.xz);
       r3.w = sqrt(r3.w);
       r4.x = cb1[94].y + -cb1[94].x;
@@ -347,8 +340,7 @@ void main(
       r0.w = r3.w * r2.w + r0.w;
       r0.w = -1 + r0.w;
       r0.w = cb1[95].z * r0.w + 1;
-      r0.z = r0.z * r0.w;
-      }
+      r0.z *= lerp(1.0, r0.w, saturate(FAKE_CLOUD_SHADOWS));
     }
     r0.w = cb3[35].z + -r0.z;
     r0.z = cb3[35].w * r0.w + r0.z;
@@ -401,7 +393,7 @@ void main(
         r3.x = dot(icb[r2.w+0].zw, r0.yw);
         r3.y = dot(icb[r2.w+0].wz, icb[r0.x+0].xy);
         r3.xy = r3.xy * r2.xx + r1.xy;
-        r3.xyzw = t2.Gather(s1_s, r3.xy).xyzw;
+        r3.xyzw = t2.Gather(s2_s, r3.xy).xyzw;
         r3.xyzw = r3.xyzw + -r1.zzzz;
         r4.xyzw = cmp(r3.xyzw >= float4(0,0,0,0));
         r4.xyzw = r4.xyzw ? float4(1,1,1,1) : 0;
@@ -438,6 +430,11 @@ void main(
   }
   o0.y = r1.w ? r0.y : r0.x;
   r0.x = min(1, r0.z);
+
+  r0.x = lerp(
+      r0.x,
+      r0.x * r0.x * (3.0 - 2.0 * r0.x),
+      saturate(SHADOW_HARDENING));
 
   r0.x = -1 + r0.x;
   o0.x = cb3[34].x * r0.x + 1;

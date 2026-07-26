@@ -103,7 +103,7 @@ void main(
     if (r2.w != 0) {
       r1.z = cmp(0 < (int)r1.z);
       if (r1.z != 0) {
-        r1.xy = t5.SampleLevel(s1_s, r1.xy, 0).xy;
+        r1.xy = t5.SampleLevel(s2_s, r1.xy, 0).xy;
         r3.xyz = -cb3[20].xyz + r2.xyz;
         r4.xyz = -cb3[21].xyz + r2.xyz;
         r5.xyz = -cb3[22].xyz + r2.xyz;
@@ -183,10 +183,10 @@ void main(
           bitmask.x = ((~(-1 << 2)) << 0) & 0xffffffff;  r0.x = (((uint)r0.y << 0) & bitmask.x) | ((uint)r0.x & ~bitmask.x);
           r0.y = dot(cb3[33].xyzw, icb[r0.z+0].xyzw);
 
-          // Per-cascade PCF kernel scaling: sharper near shadows, softer distant shadows
-          if (SHADOW_HARDENING >= 1.f) {
-            r0.y *= lerp(0.75, 1.5, saturate((float)r0.z / 3.0));
-          }
+          r0.y *= lerp(
+              1.0,
+              lerp(0.75, 1.5, saturate((float)r0.z / 3.0)),
+              saturate(SHADOW_HARDENING));
           r0.zw = icb[r0.x+4].xy * float2(1,-1);
           r3.xy = float2(0,0);
           r1.z = 0;
@@ -196,7 +196,7 @@ void main(
             r5.x = dot(icb[r1.z+4].zw, r0.zw);
             r5.y = dot(icb[r1.z+4].wz, icb[r0.x+4].xy);
             r5.xy = r5.xy * r0.yy + r1.xy;
-            r5.xyzw = t1.Gather(s1_s, r5.xy).xyzw;
+            r5.xyzw = t1.Gather(s2_s, r5.xy).xyzw;
             r5.xyzw = r5.xyzw + -r3.zzzz;
             r6.xyzw = cmp(r5.xyzw >= float4(0,0,0,0));
             r6.xyzw = r6.xyzw ? float4(1,1,1,1) : 0;
@@ -360,23 +360,16 @@ void main(
     r0.y = r0.y + -r0.x;
     r0.x = cb3[36].x * r0.y + r0.x;
 
-    // Harden the base shadow before applying the independent cloud mask.
-    if (SHADOW_HARDENING >= 1.f) {
-      r0.x = r0.x * r0.x * (3.0 - 2.0 * r0.x);
-    }
-
-    // Cloud shadow (t2) — toggle via FAKE_CLOUD_SHADOWS
-    if (FAKE_CLOUD_SHADOWS >= 1.f) {
-      r0.y = cmp(0.00100000005 < r0.x);
+    r0.y = cmp(0.00100000005 < r0.x);
     if (r0.y != 0) {
       r0.yzw = -cb1[93].xyz + r2.xyz;
       r1.xy = cb1[96].xz * r0.zz + r0.yw;
       r1.zw = cb1[94].zz * r1.xy;
       r2.xy = cb1[103].ww * cb1[95].xy;
       r1.xy = r1.xy * cb1[94].zz + r2.xy;
-      r0.z = t2.SampleLevel(s2_s, r1.xy, 0).x;
+      r0.z = t2.SampleLevel(s1_s, r1.xy, 0).x;
       r1.xy = r1.zw * cb1[95].ww + r2.xy;
-      r1.x = t2.SampleLevel(s2_s, r1.xy, 0).x;
+      r1.x = t2.SampleLevel(s1_s, r1.xy, 0).x;
       r0.y = dot(r0.yw, r0.yw);
       r0.y = sqrt(r0.y);
       r0.w = cb1[94].y + -cb1[94].x;
@@ -390,8 +383,7 @@ void main(
       r0.y = r0.y * r0.w + r0.z;
       r0.y = -1 + r0.y;
       r0.y = cb1[95].z * r0.y + 1;
-      r0.x = r0.x * r0.y;
-      }
+      r0.x *= lerp(1.0, r0.y, saturate(FAKE_CLOUD_SHADOWS));
     }
     r0.y = cb3[35].z + -r0.x;
     r0.x = cb3[35].w * r0.y + r0.x;
@@ -399,6 +391,11 @@ void main(
     r0.x = cb3[35].z;
   }
   r0.x = min(1, r0.x);
+
+  r0.x = lerp(
+      r0.x,
+      r0.x * r0.x * (3.0 - 2.0 * r0.x),
+      saturate(SHADOW_HARDENING));
 
   r0.x = -1 + r0.x;
   o0.x = cb3[34].x * r0.x + 1;

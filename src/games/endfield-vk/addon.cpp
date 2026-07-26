@@ -2384,6 +2384,8 @@ extern "C" __declspec(dllexport) constexpr const char* NAME = "RenoDX: Arknights
 extern "C" __declspec(dllexport) constexpr const char* DESCRIPTION = "RenoDX Vulkan renderer port for Arknights: Endfield";
 
 BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
+  if (!IsEndfieldProcess()) return TRUE;
+
   switch (fdw_reason) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
