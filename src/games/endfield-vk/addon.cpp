@@ -641,6 +641,7 @@ bool hotkey_input_active = false;
 bool is_ping_input_candidate = false;
 bool is_ping_drawn = false;
 bool is_uid_input_candidate = false;
+bool is_latency_bar_draw_candidate = false;
 uint32_t draw_call_vertex_count = 0;
 
 struct VfxBoostMatch {
@@ -1229,6 +1230,14 @@ bool OnPingDraw(reshade::api::command_list* cmd_list) {
   } else {
     is_ping_drawn = false;
   }
+  return true;
+}
+
+bool InjectLatencyBarDrawOpacity(reshade::api::command_list* cmd_list) {
+  shader_injection.latency_bar_draw_opacity =
+      is_latency_bar_draw_candidate
+      ? shader_injection.ping_text_opacity
+      : 1.f;
   return true;
 }
 
@@ -2185,6 +2194,7 @@ bool OnDraw(
     uint32_t first_vertex,
     uint32_t first_instance) {
   draw_call_vertex_count = vertex_count;
+  is_latency_bar_draw_candidate = false;
   shader_injection.latency_bar_draw_opacity = 1.f;
   return false;
 }
@@ -2196,6 +2206,7 @@ bool OnDrawIndexed(
     uint32_t first_index,
     int32_t vertex_offset,
     uint32_t first_instance) {
+  is_latency_bar_draw_candidate = false;
   shader_injection.latency_bar_draw_opacity = 1.f;
 
   constexpr uint32_t PING_INDEX_COUNT = 18;
@@ -2239,19 +2250,17 @@ bool OnDrawIndexed(
     return true;
   }
 
-  const bool latency_bar_draw_candidate = ping_geometry_candidate
-                                          && vertex_shader_hash == kVulkanPingVertexShaderHash
-                                          && pixel_shader_hash == kVulkanPingPixelShaderHash;
-  is_ping_input_candidate = latency_bar_draw_candidate && (draw_call_vertex_count == 0);
+  is_latency_bar_draw_candidate = ping_geometry_candidate
+                                  && vertex_shader_hash == kVulkanPingVertexShaderHash
+                                  && pixel_shader_hash == kVulkanPingPixelShaderHash;
+  is_ping_input_candidate = is_latency_bar_draw_candidate && (draw_call_vertex_count == 0);
 
-  if (latency_bar_draw_candidate) {
-    shader_injection.latency_bar_draw_opacity =
-        shader_injection.ping_text_opacity;
+  if (is_latency_bar_draw_candidate) {
     if (is_ping_input_candidate) {
       is_ping_drawn = true;
     }
     draw_call_vertex_count = 0;
-    return !IsVisible(shader_injection.ping_text_opacity);
+    return false;
   }
 
   is_uid_input_candidate = uid_geometry_candidate
@@ -2349,6 +2358,7 @@ void OnPresent(reshade::api::command_queue* queue,
   is_ping_input_candidate = false;
   is_uid_input_candidate = false;
   is_ping_drawn = false;
+  is_latency_bar_draw_candidate = false;
   draw_call_vertex_count = 0;
   shader_injection.latency_bar_draw_opacity = 1.f;
 
@@ -2575,6 +2585,13 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           RegisterUiVisibilityBypassShader(crc);
         }
         RegisterUidBypassShader(kVulkanUidPixelShaderHash);
+
+        {
+          auto it = custom_shaders.find(kVulkanPingVertexShaderHash);
+          if (it != custom_shaders.end()) {
+            it->second.on_inject = InjectLatencyBarDrawOpacity;
+          }
+        }
 
         {
           auto it = custom_shaders.find(kVulkanPingPixelShaderHash);
