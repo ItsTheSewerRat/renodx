@@ -2185,6 +2185,7 @@ bool OnDraw(
     uint32_t first_vertex,
     uint32_t first_instance) {
   draw_call_vertex_count = vertex_count;
+  shader_injection.latency_bar_draw_opacity = 1.f;
   return false;
 }
 
@@ -2195,6 +2196,8 @@ bool OnDrawIndexed(
     uint32_t first_index,
     int32_t vertex_offset,
     uint32_t first_instance) {
+  shader_injection.latency_bar_draw_opacity = 1.f;
+
   constexpr uint32_t PING_INDEX_COUNT = 18;
   constexpr uint32_t PING_FIRST_INDEX = 0;
   constexpr int32_t PING_VERTEX_OFFSET = 0;
@@ -2242,11 +2245,13 @@ bool OnDrawIndexed(
   is_ping_input_candidate = latency_bar_draw_candidate && (draw_call_vertex_count == 0);
 
   if (latency_bar_draw_candidate) {
+    shader_injection.latency_bar_draw_opacity =
+        shader_injection.ping_text_opacity;
     if (is_ping_input_candidate) {
       is_ping_drawn = true;
     }
     draw_call_vertex_count = 0;
-    return false;
+    return !IsVisible(shader_injection.ping_text_opacity);
   }
 
   is_uid_input_candidate = uid_geometry_candidate
@@ -2345,6 +2350,7 @@ void OnPresent(reshade::api::command_queue* queue,
   is_uid_input_candidate = false;
   is_ping_drawn = false;
   draw_call_vertex_count = 0;
+  shader_injection.latency_bar_draw_opacity = 1.f;
 
   float current_tech_test = shader_injection.tech_test_look;
   if (current_tech_test != prev_tech_test_look) {

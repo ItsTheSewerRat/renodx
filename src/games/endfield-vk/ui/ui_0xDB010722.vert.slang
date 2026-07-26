@@ -170,7 +170,7 @@ SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
     _4 = stage_input._4;
     _5 = stage_input._5;
     vert_main();
-    if (PING_TEXT_OPACITY < 0.5f)
+    if (LATENCY_BAR_DRAW_OPACITY < 0.5f)
     {
         float2 d3d_ndc = float2(gl_Position.x, -gl_Position.y) / max(abs(gl_Position.w), 0.00001f);
         if ((d3d_ndc.x >= -0.99f && d3d_ndc.x <= -0.93f)
