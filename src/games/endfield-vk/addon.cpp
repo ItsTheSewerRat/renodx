@@ -625,10 +625,17 @@ bool ExecuteReshadeEffects(reshade::api::command_list* cmd_list) {
   const std::shared_lock lock(data->mutex);
   for (auto* runtime : data->effect_runtimes) {
     UpdateReshadeResolutionUniforms(runtime, rtv_width, rtv_height);
-    bypass_render_active = true;
     runtime->set_effects_state(true);
-    runtime->render_effects(cmd_list, rtv0, rtv0);
-    bypass_render_active = false;
+    runtime->enumerate_techniques(
+        nullptr,
+        [cmd_list, rtv0](
+            reshade::api::effect_runtime* rt,
+            reshade::api::effect_technique technique) {
+          if (!rt->get_technique_state(technique)) return;
+          bypass_render_active = true;
+          rt->render_technique(technique, cmd_list, rtv0, rtv0);
+          bypass_render_active = false;
+        });
   }
 
   return true;
