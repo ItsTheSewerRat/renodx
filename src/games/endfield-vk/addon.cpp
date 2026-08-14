@@ -18,8 +18,6 @@
 #include <vector>
 
 #include <Windows.h>
-#include <detours.h>
-#include <vulkan/vulkan.h>
 
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
@@ -40,14 +38,9 @@
 
 namespace {
 
-PFN_vkCreateSwapchainKHR real_vk_create_swapchain = nullptr;
-PFN_vkCmdSetScissorWithCount vk_cmd_set_scissor_with_count = nullptr;
-bool vulkan_swapchain_hook_installed = false;
 std::atomic_bool vfx_boost_tracking_enabled = false;
 std::atomic_bool vfx_discovery_cache_active = false;
 std::atomic_bool vfx_readback_work_pending = false;
-std::atomic_uint32_t vulkan_swapchain_width = 0u;
-std::atomic_uint32_t vulkan_swapchain_height = 0u;
 std::once_flag vfx_readback_failure_log_once;
 
 constexpr size_t kVfxTextureBindingCount = 3u;
@@ -91,17 +84,6 @@ void UpdateTrackedVfxTextureView(
   }
 }
 
-HMODULE GetReshadeVulkanModule() {
-  HMODULE reshade_module = GetModuleHandleW(L"ReShade64.dll");
-  if (reshade_module == nullptr) {
-    reshade_module = GetModuleHandleW(L"ReShade64-endfield-vk.dll");
-  }
-  if (reshade_module == nullptr) {
-    reshade_module = GetModuleHandleW(L"ReShadeVulkanLayer.dll");
-  }
-  return reshade_module;
-}
-
 bool IsEndfieldProcess() {
   wchar_t process_path[MAX_PATH] = {};
   GetModuleFileNameW(nullptr, process_path, static_cast<DWORD>(std::size(process_path)));
@@ -112,46 +94,8 @@ bool IsEndfieldProcess() {
       == 0;
 }
 
-VkResult VKAPI_CALL HookVkCreateSwapchainKHR(
-    VkDevice device,
-    const VkSwapchainCreateInfoKHR* create_info,
-    const VkAllocationCallbacks* allocator,
-    VkSwapchainKHR* swapchain) {
-  VkSwapchainCreateInfoKHR updated_create_info = *create_info;
-  switch (renodx::mods::swapchain::target_color_space) {
-    case reshade::api::color_space::hdr10_st2084:
-      updated_create_info.imageColorSpace = VK_COLOR_SPACE_HDR10_ST2084_EXT;
-      break;
-    case reshade::api::color_space::extended_srgb_linear:
-      updated_create_info.imageColorSpace = VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
-      break;
-    case reshade::api::color_space::srgb_nonlinear:
-      updated_create_info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-      break;
-    default:
-      break;
-  }
-
-  const bool changed = updated_create_info.imageColorSpace != create_info->imageColorSpace;
-  const VkResult result = real_vk_create_swapchain(
-      device,
-      &updated_create_info,
-      allocator,
-      swapchain);
-  if (result >= VK_SUCCESS || !changed) {
-    if (result >= VK_SUCCESS) {
-      vulkan_swapchain_width.store(create_info->imageExtent.width, std::memory_order_relaxed);
-      vulkan_swapchain_height.store(create_info->imageExtent.height, std::memory_order_relaxed);
-    }
-    return result;
-  }
-
-  const VkResult retry_result = real_vk_create_swapchain(device, create_info, allocator, swapchain);
-  if (retry_result >= VK_SUCCESS) {
-    vulkan_swapchain_width.store(create_info->imageExtent.width, std::memory_order_relaxed);
-    vulkan_swapchain_height.store(create_info->imageExtent.height, std::memory_order_relaxed);
-  }
-  return retry_result;
+uint64_t GetCommandListKey(const reshade::api::command_list* cmd_list) {
+  return reinterpret_cast<uintptr_t>(cmd_list);
 }
 
 void OnBindVfxDescriptorTables(
@@ -167,8 +111,7 @@ void OnBindVfxDescriptorTables(
     return;
   }
 
-  const uint64_t command_buffer = reinterpret_cast<uint64_t>(
-      reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
+  const uint64_t command_buffer = GetCommandListKey(cmd_list);
   const std::lock_guard lock(vulkan_descriptor_mutex);
   vulkan_graphics_descriptor_set_1[command_buffer] = tables[1u - first].handle;
   vulkan_graphics_push_images_set_1.erase(command_buffer);
@@ -192,8 +135,7 @@ void OnPushVfxDescriptors(
     return;
   }
 
-  const uint64_t command_buffer = reinterpret_cast<uint64_t>(
-      reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
+  const uint64_t command_buffer = GetCommandListKey(cmd_list);
   const std::lock_guard lock(vulkan_descriptor_mutex);
   vulkan_graphics_descriptor_set_1.erase(command_buffer);
   auto& images = vulkan_graphics_push_images_set_1[command_buffer];
@@ -283,81 +225,6 @@ bool OnCopyVfxDescriptorTables(
   return false;
 }
 
-void OnInitVulkanSwapchainHook(reshade::api::device* device) {
-  if (device->get_api() != reshade::api::device_api::vulkan
-      || !IsEndfieldProcess()) {
-    return;
-  }
-
-  const HMODULE reshade_module = GetReshadeVulkanModule();
-  if (reshade_module == nullptr) {
-    reshade::log::message(
-        reshade::log::level::error,
-        "[Endfield-VK] The active ReShade Vulkan module was not found for the swapchain hook.");
-    return;
-  }
-
-  const auto get_device_proc_addr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-      GetProcAddress(reshade_module, "vkGetDeviceProcAddr"));
-  if (get_device_proc_addr == nullptr) {
-    reshade::log::message(
-        reshade::log::level::error,
-        "[Endfield-VK] vkGetDeviceProcAddr was not exported by ReShade for the swapchain hook.");
-    return;
-  }
-
-  const auto native_device = reinterpret_cast<VkDevice>(device->get_native());
-  vk_cmd_set_scissor_with_count = reinterpret_cast<PFN_vkCmdSetScissorWithCount>(
-      get_device_proc_addr(native_device, "vkCmdSetScissorWithCount"));
-  if (vk_cmd_set_scissor_with_count == nullptr) {
-    reshade::log::message(
-        reshade::log::level::error,
-        "[Endfield-VK] vkCmdSetScissorWithCount is unavailable; UID/latency text splitting cannot run.");
-  }
-
-  if (!vulkan_swapchain_hook_installed) {
-    real_vk_create_swapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR>(
-        get_device_proc_addr(native_device, "vkCreateSwapchainKHR"));
-    if (real_vk_create_swapchain == nullptr) {
-      reshade::log::message(
-          reshade::log::level::error,
-          "[Endfield-VK] vkCreateSwapchainKHR was unavailable for the swapchain hook.");
-    } else if (DetourTransactionBegin() != NO_ERROR
-               || DetourUpdateThread(GetCurrentThread()) != NO_ERROR
-               || DetourAttach(
-                      reinterpret_cast<void**>(&real_vk_create_swapchain),
-                      HookVkCreateSwapchainKHR)
-                      != NO_ERROR
-               || DetourTransactionCommit() != NO_ERROR) {
-      DetourTransactionAbort();
-      real_vk_create_swapchain = nullptr;
-      reshade::log::message(
-          reshade::log::level::error,
-          "[Endfield-VK] Failed to install the native Vulkan swapchain color-space hook.");
-    } else {
-      vulkan_swapchain_hook_installed = true;
-    }
-  }
-
-}
-
-void UninstallVulkanSwapchainHook() {
-  if (!vulkan_swapchain_hook_installed || real_vk_create_swapchain == nullptr) return;
-
-  if (DetourTransactionBegin() == NO_ERROR
-      && DetourUpdateThread(GetCurrentThread()) == NO_ERROR
-      && DetourDetach(
-             reinterpret_cast<void**>(&real_vk_create_swapchain),
-             HookVkCreateSwapchainKHR)
-             == NO_ERROR
-      && DetourTransactionCommit() == NO_ERROR) {
-    vulkan_swapchain_hook_installed = false;
-    real_vk_create_swapchain = nullptr;
-  } else {
-    DetourTransactionAbort();
-  }
-}
-
 renodx::mods::shader::CustomShaders custom_shaders;
 
 void RegisterCustomShader(
@@ -378,8 +245,8 @@ void InitializeCustomShaders() {
 
 ShaderInjectData shader_injection;
 
-// The complete Endfield payload is descriptor-backed on Vulkan. Keep the
-// fullscreen output pass on a small, guaranteed-portable push-constant payload.
+// Keep the fullscreen output pass on a compact push-constant payload while
+// game shader injection uses RenoDX's official Vulkan push-constant path.
 struct SwapChainInjectData {
   float peak_white_nits;
   float graphics_white_nits;
@@ -454,8 +321,8 @@ void ApplySwapChainEncodingTarget(float encoding_value) {
   }
   renodx::mods::swapchain::target_color_space = GetSwapChainColorSpace(encoding_value);
 
-  // Vulkan has no DXGI ResizeBuffers fallback. ReShade selects the surface
-  // format and the game-local hook applies the matching native color space.
+  // Official RenoDX/ReShade Vulkan support applies the requested surface
+  // format and color space during swapchain creation and initialization.
   renodx::mods::swapchain::use_resize_buffer = false;
   renodx::utils::device_proxy::SetTargetFormat(renodx::mods::swapchain::target_format);
   renodx::utils::device_proxy::SetTargetColorSpace(renodx::mods::swapchain::target_color_space);
@@ -709,8 +576,7 @@ void SetVfxBoostTrackingEnabled(bool enabled) {
 }
 
 void ClearVfxCommandListDescriptors(reshade::api::command_list* cmd_list) {
-  const uint64_t command_buffer = reinterpret_cast<uint64_t>(
-      reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
+  const uint64_t command_buffer = GetCommandListKey(cmd_list);
   const std::lock_guard lock(vulkan_descriptor_mutex);
   vulkan_graphics_descriptor_set_1.erase(command_buffer);
   vulkan_graphics_push_images_set_1.erase(command_buffer);
@@ -913,8 +779,7 @@ reshade::api::resource_view GetBoundVfxTextureView(
   const size_t binding_index = GetTrackedVfxTextureBindingIndex(binding);
   if (binding_index == kVfxTextureBindingCount) return {0u};
 
-  const uint64_t command_buffer = reinterpret_cast<uint64_t>(
-      reinterpret_cast<VkCommandBuffer>(cmd_list->get_native()));
+  const uint64_t command_buffer = GetCommandListKey(cmd_list);
   const std::shared_lock lock(vulkan_descriptor_mutex);
 
   const auto pushed = vulkan_graphics_push_images_set_1.find(command_buffer);
@@ -1196,38 +1061,47 @@ bool DrawTextRegion(
     int32_t vertex_offset,
     uint32_t first_instance,
     bool keep_latency_text) {
-  if (vk_cmd_set_scissor_with_count == nullptr) return false;
-  const uint32_t width = vulkan_swapchain_width.load(std::memory_order_relaxed);
-  const uint32_t height = vulkan_swapchain_height.load(std::memory_order_relaxed);
-  if (width == 0u || height == 0u) return false;
+  const auto* state = renodx::utils::state::GetCurrentState(cmd_list);
+  if (state == nullptr || state->scissor_rects.empty()) return false;
 
+  const auto restore_rects = state->scissor_rects;
+  const auto& render_rect = restore_rects.front();
+  if (render_rect.right <= render_rect.left
+      || render_rect.bottom <= render_rect.top) {
+    return false;
+  }
+
+  const uint32_t height = static_cast<uint32_t>(render_rect.bottom - render_rect.top);
   constexpr float kTextSplitFromHeight = 192.f / 2160.f;
-  const uint32_t split_x = std::min(
-      width,
-      static_cast<uint32_t>(height * kTextSplitFromHeight + 0.5f));
-  const VkRect2D clip_rect = keep_latency_text
-      ? VkRect2D{
-            .offset = {.x = 0, .y = 0},
-            .extent = {.width = split_x, .height = height},
+  const int32_t split_x = std::min(
+      render_rect.right,
+      render_rect.left
+          + static_cast<int32_t>(height * kTextSplitFromHeight + 0.5f));
+  const reshade::api::rect clip_rect = keep_latency_text
+      ? reshade::api::rect{
+            .left = render_rect.left,
+            .top = render_rect.top,
+            .right = split_x,
+            .bottom = render_rect.bottom,
         }
-      : VkRect2D{
-            .offset = {.x = static_cast<int32_t>(split_x), .y = 0},
-            .extent = {.width = width - split_x, .height = height},
+      : reshade::api::rect{
+            .left = split_x,
+            .top = render_rect.top,
+            .right = render_rect.right,
+            .bottom = render_rect.bottom,
         };
-  const VkRect2D restore_rect = {
-      .offset = {.x = 0, .y = 0},
-      .extent = {.width = width, .height = height},
-  };
 
-  const auto native_cmd_list = reinterpret_cast<VkCommandBuffer>(cmd_list->get_native());
-  vk_cmd_set_scissor_with_count(native_cmd_list, 1u, &clip_rect);
+  cmd_list->bind_scissor_rects(0u, 1u, &clip_rect);
   cmd_list->draw_indexed(
       index_count,
       instance_count,
       first_index,
       vertex_offset,
       first_instance);
-  vk_cmd_set_scissor_with_count(native_cmd_list, 1u, &restore_rect);
+  cmd_list->bind_scissor_rects(
+      0u,
+      static_cast<uint32_t>(restore_rects.size()),
+      restore_rects.data());
   return true;
 }
 
@@ -2412,24 +2286,14 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   switch (fdw_reason) {
     case DLL_PROCESS_ATTACH:
       if (!reshade::register_addon(h_module)) return FALSE;
-      reshade::register_event<reshade::addon_event::init_device>(OnInitVulkanSwapchainHook);
 
       if (!initialized) {
         InitializeCustomShaders();
-        renodx::mods::shader::force_pipeline_cloning = true;
-        renodx::mods::shader::use_pipeline_layout_cloning = false;
-        renodx::mods::shader::expected_constant_buffer_space = 50;
-        renodx::mods::shader::expected_constant_buffer_index = 13;
         renodx::mods::shader::allow_multiple_push_constants = true;
         renodx::mods::shader::minimum_constant_buffer_stages =
             reshade::api::shader_stage::vertex
             | reshade::api::shader_stage::pixel
             | reshade::api::shader_stage::compute;
-        renodx::mods::shader::use_vulkan_descriptor_constant_buffer = true;
-        renodx::mods::shader::vulkan_descriptor_constant_buffer_set = 4u;
-        renodx::mods::shader::vulkan_descriptor_constant_buffer_binding = 0u;
-        renodx::mods::swapchain::expected_constant_buffer_index = 13;
-        renodx::mods::swapchain::expected_constant_buffer_space = 50;
         renodx::mods::swapchain::use_resource_cloning = true;
         renodx::mods::swapchain::ignored_device_apis = {
             reshade::api::device_api::d3d9,
@@ -2619,8 +2483,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
 
       break;
     case DLL_PROCESS_DETACH:
-      reshade::unregister_event<reshade::addon_event::init_device>(OnInitVulkanSwapchainHook);
-      UninstallVulkanSwapchainHook();
       reshade::unregister_event<reshade::addon_event::draw>(OnDraw);
       reshade::unregister_event<reshade::addon_event::draw_indexed>(OnDrawIndexed);
       reshade::unregister_event<reshade::addon_event::reset_command_list>(

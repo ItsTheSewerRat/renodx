@@ -66,11 +66,15 @@ struct ShaderInjectData {
 
 #ifndef __cplusplus
 #ifdef __SLANG__
-// The Vulkan port keeps the settings payload out of push constants. Endfield's
-// full payload is 240 bytes, while several game pipelines already consume part
-// of the commonly available 256-byte push-constant budget.
-[[vk::binding(0, 4)]]
-ConstantBuffer<ShaderInjectData> shader_injection;
+struct PushData {
+  [[vk::offset(0)]]
+  ShaderInjectData shader_injection;
+};
+
+[[vk::push_constant]]
+PushData gPush;
+
+#define shader_injection gPush.shader_injection
 #else
 #if ((__SHADER_TARGET_MAJOR == 5 && __SHADER_TARGET_MINOR >= 1) || __SHADER_TARGET_MAJOR >= 6)
 cbuffer shader_injection : register(b13, space50) {
