@@ -3,8 +3,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
-#include <chrono>
-#include <format>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -14,7 +12,6 @@
 #include <Windows.h>
 #include <include/reshade.hpp>
 #include "../../mods/swapchain.hpp"
-#include "../../utils/draw.hpp"
 #include "../../utils/render.hpp"
 #include "../../utils/resource_upgrade.hpp"
 #include "../../../external/Streamline/source/core/sl.interposer/renodx_streamline_bridge.h"
@@ -22,8 +19,6 @@
 namespace renodx::games::endfield::streamline {
 
 inline constexpr uint32_t kVkFormatA2B10G10R10UnormPack32 = 64u;
-inline constexpr uint32_t kRestoreQuarantineMilliseconds = 500u;
-inline constexpr uint32_t kRestoreQuarantinePassThroughPresentCount = 3u;
 
 inline std::mutex mutex;
 inline std::unordered_map<uint64_t, reshade::api::command_list*> command_lists;
@@ -37,22 +32,6 @@ inline const float* push_constants = nullptr;
 inline size_t push_constant_count = 0u;
 inline const float* output_encoding = nullptr;
 inline thread_local uint32_t display_ready_pq_present_depth = 0u;
-inline std::mutex present_mutex;
-inline std::unordered_map<
-    uint64_t,
-    std::unique_ptr<renodx::utils::draw::SwapchainProxyPass>>
-    present_passes;
-
-struct PresentWindowState {
-  bool background = false;
-  bool restore_pending = false;
-  uint64_t epoch = 0u;
-  std::chrono::steady_clock::time_point foreground_since{};
-  uint32_t pass_through_present_count = 0u;
-};
-
-inline std::mutex present_window_mutex;
-inline std::unordered_map<HWND, PresentWindowState> present_window_states;
 
 inline renodx::utils::resource::ResourceUpgradeInfo client_upgrade_target = {
     .old_format = reshade::api::format::r10g10b10a2_unorm,
@@ -74,7 +53,9 @@ struct ClientImageState {
   uint32_t height = 0u;
   bool clone_active = false;
   bool pass_initialized = false;
+  bool display_pass_initialized = false;
   renodx::utils::render::RenderPass pq_pass;
+  renodx::utils::render::RenderPass display_pass;
 };
 
 inline std::unordered_map<uint64_t, std::unique_ptr<ClientImageState>>
@@ -119,8 +100,6 @@ inline void OnInitSwapchain(
   }
 }
 
-inline uint32_t DeactivateClientImagesForPresentBoundary();
-
 inline void OnPresent(
     reshade::api::command_queue* queue,
     reshade::api::swapchain* swapchain,
@@ -129,133 +108,17 @@ inline void OnPresent(
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
   if (queue == nullptr || swapchain == nullptr) return;
-
-  const bool display_ready_present = display_ready_pq_present_depth != 0u;
-  const auto hwnd = static_cast<HWND>(swapchain->get_hwnd());
-  const bool foreground = hwnd == nullptr
-      || (IsWindowVisible(hwnd) != FALSE && IsIconic(hwnd) == FALSE
-          && GetForegroundWindow() == hwnd);
-  bool background_started = false;
-  bool foreground_restored = false;
-  bool restore_pending = false;
-  uint64_t boundary_epoch = 0u;
-  if (hwnd != nullptr) {
-    std::lock_guard lock(present_window_mutex);
-    auto& state = present_window_states[hwnd];
-    if (!foreground) {
-      if (!state.background) {
-        state.background = true;
-        state.restore_pending = true;
-        ++state.epoch;
-        state.foreground_since = {};
-        state.pass_through_present_count = 0u;
-        background_started = true;
-      }
-    } else if (state.background) {
-      state.background = false;
-      state.foreground_since = std::chrono::steady_clock::now();
-      state.pass_through_present_count = 0u;
-      foreground_restored = true;
-    }
-    restore_pending = state.restore_pending;
-    boundary_epoch = state.epoch;
-  }
-
-  if (background_started) {
-    const uint32_t deactivated = DeactivateClientImagesForPresentBoundary();
-    reshade::log::message(
-        reshade::log::level::info,
-        std::format(
-            "[Endfield restore boundary] Background epoch {} started for window {}; invalidated {} client-image activation(s) and suspended RenoDX present work.",
-            boundary_epoch,
-            static_cast<void*>(hwnd),
-            deactivated)
-            .c_str());
-  }
-  if (foreground_restored) {
-    reshade::log::message(
-        reshade::log::level::info,
-        std::format(
-            "[Endfield restore boundary] Window {} returned to the foreground in epoch {}; generated present work remains quarantined for at least {} ms and {} pass-through presents.",
-            static_cast<void*>(hwnd),
-            boundary_epoch,
-            kRestoreQuarantineMilliseconds,
-            kRestoreQuarantinePassThroughPresentCount)
-            .c_str());
-  }
-
-  if (!foreground || (restore_pending && display_ready_present)) return;
-
-  if (!display_ready_present
-      || queue->get_device()->get_api()
-          != reshade::api::device_api::vulkan) {
-    renodx::mods::swapchain::v2::OnPresent(
-        queue,
-        swapchain,
-        source_rect,
-        dest_rect,
-        dirty_rect_count,
-        dirty_rects);
-
-    if (restore_pending && hwnd != nullptr
-        && GetForegroundWindow() == hwnd) {
-      bool completed = false;
-      uint32_t completed_present_count = 0u;
-      int64_t completed_elapsed_ms = 0;
-      {
-        std::lock_guard lock(present_window_mutex);
-        const auto found = present_window_states.find(hwnd);
-        if (found != present_window_states.end()
-            && found->second.restore_pending
-            && !found->second.background
-            && found->second.epoch == boundary_epoch) {
-          ++found->second.pass_through_present_count;
-          const auto elapsed = std::chrono::steady_clock::now()
-              - found->second.foreground_since;
-          if (found->second.pass_through_present_count
-                  >= kRestoreQuarantinePassThroughPresentCount
-              && elapsed >= std::chrono::milliseconds(
-                  kRestoreQuarantineMilliseconds)) {
-            found->second.restore_pending = false;
-            completed = true;
-            completed_present_count =
-                found->second.pass_through_present_count;
-            completed_elapsed_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(elapsed)
-                    .count();
-          }
-        }
-      }
-      if (completed) {
-        reshade::log::message(
-            reshade::log::level::info,
-            std::format(
-                "[Endfield restore boundary] Foreground quarantine completed for window {} in epoch {} after {} pass-through presents and {} ms; generated RenoDX present work resumed.",
-                static_cast<void*>(hwnd),
-                boundary_epoch,
-                completed_present_count,
-                completed_elapsed_ms)
-                .c_str());
-      }
-    }
+  if (display_ready_pq_present_depth != 0u
+      && queue->get_device()->get_api() == reshade::api::device_api::vulkan) {
     return;
   }
-
-  std::lock_guard lock(present_mutex);
-  const auto back_buffer = swapchain->get_current_back_buffer();
-  auto& pass = present_passes[back_buffer.handle];
-  if (pass == nullptr) {
-    pass = std::make_unique<renodx::utils::draw::SwapchainProxyPass>();
-    pass->vertex_shader = vertex_shader;
-    pass->pixel_shader = pq_copy_pixel_shader;
-    pass->revert_state = false;
-    pass->use_compatibility_mode = false;
-    pass->proxy_format = reshade::api::format::r10g10b10a2_unorm;
-  }
-  if (!pass->Render(swapchain, queue)) {
-    pass->Destroy(queue->get_device());
-    present_passes.erase(back_buffer.handle);
-  }
+  renodx::mods::swapchain::v2::OnPresent(
+      queue,
+      swapchain,
+      source_rect,
+      dest_rect,
+      dirty_rect_count,
+      dirty_rects);
 }
 
 inline bool SetClientCloneActive(ClientImageState* state, bool active) {
@@ -282,19 +145,6 @@ inline bool SetClientCloneActive(ClientImageState* state, bool active) {
       view_handles, active, false, &client_upgrade_target);
   state->clone_active = active;
   return true;
-}
-
-inline uint32_t DeactivateClientImagesForPresentBoundary() {
-  std::lock_guard lock(mutex);
-  uint32_t deactivated = 0u;
-  for (auto& [image, state] : client_images) {
-    (void)image;
-    if (state != nullptr && state->clone_active
-        && SetClientCloneActive(state.get(), false)) {
-      ++deactivated;
-    }
-  }
-  return deactivated;
 }
 
 inline bool RegisterClientImage(
@@ -359,12 +209,15 @@ inline bool RegisterClientImage(
 
   auto& state = client_images[image];
   if (state == nullptr) state = std::make_unique<ClientImageState>();
-  if (state->pass_initialized
+  if ((state->pass_initialized || state->display_pass_initialized)
       && (state->device != device || state->clone.handle != clone.handle
           || state->width != width || state->height != height)) {
     state->pq_pass.DestroyAll(state->device);
+    state->display_pass.DestroyAll(state->device);
     state->pq_pass = {};
+    state->display_pass = {};
     state->pass_initialized = false;
+    state->display_pass_initialized = false;
   }
   state->device = device;
   state->original = original;
@@ -375,40 +228,44 @@ inline bool RegisterClientImage(
   return true;
 }
 
-inline bool ConvertClientImage(
+inline bool RenderClientImage(
     reshade::api::command_list* cmd_list,
-    ClientImageState* state) {
+    ClientImageState* state,
+    renodx::utils::render::RenderPass* pass,
+    bool* pass_initialized,
+    std::span<const uint8_t> conversion_shader,
+    bool bind_push_constants) {
   if (cmd_list == nullptr || state == nullptr
       || state->device != cmd_list->get_device()
       || state->original.handle == 0u || state->clone.handle == 0u
       || state->width == 0u || state->height == 0u
-      || !state->clone_active || push_constants == nullptr) {
+      || pass == nullptr || pass_initialized == nullptr
+      || conversion_shader.empty()
+      || (bind_push_constants && push_constants == nullptr)) {
     return false;
   }
-  if (!SetClientCloneActive(state, false)) return false;
 
-  auto& pass = state->pq_pass;
-  if (!state->pass_initialized) {
-    pass.render_target_slots.resources = {state->original};
-    pass.shader_resource_slots.resources = {state->clone};
-    pass.pipeline_subobjects.vertex_shader = vertex_shader;
-    pass.pipeline_subobjects.pixel_shader = pixel_shader;
-    pass.pipeline_subobjects.render_target_formats = {
+  if (!*pass_initialized) {
+    pass->render_target_slots.resources = {state->original};
+    pass->shader_resource_slots.resources = {state->clone};
+    pass->pipeline_subobjects.vertex_shader = vertex_shader;
+    pass->pipeline_subobjects.pixel_shader = conversion_shader;
+    pass->pipeline_subobjects.render_target_formats = {
         reshade::api::format::r10g10b10a2_unorm};
-    pass.auto_generate_render_target_formats = false;
-    pass.auto_generate_viewport = false;
-    pass.viewports.resize(1u);
-    pass.auto_generate_scissors = false;
-    pass.scissors.resize(1u);
-    pass.render_target_load_op = reshade::api::render_pass_load_op::discard;
-    pass.render_target_store_op = reshade::api::render_pass_store_op::store;
-    pass.revert_state_after_render = false;
-    pass.flush_after_render = false;
-    pass.use_render_pass = true;
-    state->pass_initialized = true;
+    pass->auto_generate_render_target_formats = false;
+    pass->auto_generate_viewport = false;
+    pass->viewports.resize(1u);
+    pass->auto_generate_scissors = false;
+    pass->scissors.resize(1u);
+    pass->render_target_load_op = reshade::api::render_pass_load_op::discard;
+    pass->render_target_store_op = reshade::api::render_pass_store_op::store;
+    pass->revert_state_after_render = false;
+    pass->flush_after_render = false;
+    pass->use_render_pass = true;
+    *pass_initialized = true;
   }
 
-  pass.viewports[0] = {
+  pass->viewports[0] = {
       .x = 0.f,
       .y = 0.f,
       .width = static_cast<float>(state->width),
@@ -416,15 +273,17 @@ inline bool ConvertClientImage(
       .min_depth = 0.f,
       .max_depth = 1.f,
   };
-  pass.scissors[0] = {
+  pass->scissors[0] = {
       .left = 0,
       .top = 0,
       .right = static_cast<int32_t>(state->width),
       .bottom = static_cast<int32_t>(state->height),
   };
-  pass.push_constants.clear();
-  pass.push_constants[{.slot = 0u, .space = 0u}] =
-      std::span<const float>(push_constants, push_constant_count);
+  pass->push_constants.clear();
+  if (bind_push_constants) {
+    pass->push_constants[{.slot = 0u, .space = 0u}] =
+        std::span<const float>(push_constants, push_constant_count);
+  }
 
   const std::array resources = {state->clone, state->original};
   constexpr std::array old_states = {
@@ -438,16 +297,48 @@ inline bool ConvertClientImage(
   cmd_list->barrier(
       static_cast<uint32_t>(resources.size()),
       resources.data(), old_states.data(), render_states.data());
-  if (!pass.Render(cmd_list)) {
-    SetClientCloneActive(state, true);
-    return false;
-  }
+  const bool rendered = pass->Render(cmd_list);
   cmd_list->barrier(
       static_cast<uint32_t>(resources.size()),
       resources.data(), render_states.data(), old_states.data());
-  return true;
+  return rendered;
 }
 
+inline bool ConvertClientImage(
+    reshade::api::command_list* cmd_list,
+    ClientImageState* state) {
+  if (state == nullptr || !state->clone_active
+      || !SetClientCloneActive(state, false)) {
+    return false;
+  }
+  const bool rendered = RenderClientImage(
+      cmd_list,
+      state,
+      &state->pq_pass,
+      &state->pass_initialized,
+      pixel_shader,
+      true);
+  if (!rendered) SetClientCloneActive(state, true);
+  return rendered;
+}
+
+inline bool ConvertDisplayImage(
+    reshade::api::command_list* cmd_list,
+    ClientImageState* state) {
+  if (state == nullptr) return false;
+  if (!state->clone_active && !SetClientCloneActive(state, true)) return false;
+  if (!SetClientCloneActive(state, false)) return false;
+
+  const bool rendered = RenderClientImage(
+      cmd_list,
+      state,
+      &state->display_pass,
+      &state->display_pass_initialized,
+      pq_copy_pixel_shader,
+      false);
+  const bool reactivated = SetClientCloneActive(state, true);
+  return rendered && reactivated;
+}
 inline bool ManageClientImage(
     uint32_t operation,
     uint64_t command_buffer,
@@ -461,11 +352,58 @@ inline bool ManageClientImage(
         && RegisterClientImage(image, width, height, native_format);
   }
 
+  if (operation
+      == renodx::streamline_bridge::kClientImageOperationConvertDisplay) {
+    if (command_buffer == 0u) return false;
+    const auto command_list = command_lists.find(command_buffer);
+    if (command_list == command_lists.end()) return false;
+
+    auto found = client_images.find(image);
+    if (found == client_images.end()) {
+      uint32_t display_width = 0u;
+      uint32_t display_height = 0u;
+      const bool compatible = renodx::utils::resource::GetResourceInfo(
+          reshade::api::resource{image},
+          [&display_width, &display_height](
+              const renodx::utils::resource::ResourceInfo& info) {
+            if (info.destroyed || !info.is_swap_chain
+                || info.desc.type != reshade::api::resource_type::texture_2d
+                || info.clone.handle == 0u
+                || info.clone_desc.type
+                    != reshade::api::resource_type::texture_2d
+                || reshade::api::format_to_default_typed(
+                       info.desc.texture.format, 0)
+                    != reshade::api::format::r10g10b10a2_unorm
+                || reshade::api::format_to_default_typed(
+                       info.clone_desc.texture.format, 0)
+                    != reshade::api::format::r16g16b16a16_float) {
+              return;
+            }
+            display_width = info.desc.texture.width;
+            display_height = info.desc.texture.height;
+          });
+      if (!compatible || display_width == 0u || display_height == 0u
+          || !RegisterClientImage(
+              image,
+              display_width,
+              display_height,
+              kVkFormatA2B10G10R10UnormPack32)) {
+        return false;
+      }
+      found = client_images.find(image);
+      if (found == client_images.end()) return false;
+    }
+    return ConvertDisplayImage(command_list->second, found->second.get());
+  }
+
   const auto found = client_images.find(image);
   if (found == client_images.end()) return false;
   if (operation == renodx::streamline_bridge::kClientImageOperationActivate) {
-    return command_buffer == 0u
-        && SetClientCloneActive(found->second.get(), true);
+    if (command_buffer != 0u
+        || !SetClientCloneActive(found->second.get(), true)) {
+      return false;
+    }
+    return true;
   }
   if (operation != renodx::streamline_bridge::kClientImageOperationConvert
       || command_buffer == 0u) {
@@ -590,17 +528,6 @@ inline void OnDestroyCommandList(reshade::api::command_list* cmd_list) {
 }
 
 inline void OnDestroyDevice(reshade::api::device* device) {
-  {
-    std::lock_guard lock(present_mutex);
-    for (auto& [handle, pass] : present_passes) {
-      pass->Destroy(device);
-    }
-    present_passes.clear();
-  }
-  {
-    std::lock_guard lock(present_window_mutex);
-    present_window_states.clear();
-  }
   std::lock_guard lock(mutex);
   command_lists.clear();
   if (render_device == device) {
@@ -615,6 +542,7 @@ inline void OnDestroyDevice(reshade::api::device* device) {
       continue;
     }
     it->second->pq_pass.DestroyAll(device);
+    it->second->display_pass.DestroyAll(device);
     it = client_images.erase(it);
   }
 }
@@ -626,6 +554,7 @@ inline void OnDestroyResource(
   const auto found = client_images.find(resource.handle);
   if (found == client_images.end()) return;
   found->second->pq_pass.DestroyAll(device);
+  found->second->display_pass.DestroyAll(device);
   client_images.erase(found);
 }
 
