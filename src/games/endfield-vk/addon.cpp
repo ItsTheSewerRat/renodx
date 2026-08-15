@@ -13,6 +13,7 @@
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -37,6 +38,7 @@ static_assert(RESHADE_API_VERSION >= 20, "Endfield Vulkan requires ReShade API 2
 #include "../../utils/state.hpp"
 #include "../../utils/swapchain.hpp"
 #include "./shared.h"
+#include "./streamline_bridge.hpp"
 
 namespace {
 
@@ -2286,6 +2288,68 @@ bool initialized = false;
 extern "C" __declspec(dllexport) constexpr const char* NAME = "RenoDX: Arknights Endfield (Vulkan)";
 extern "C" __declspec(dllexport) constexpr const char* DESCRIPTION = "RenoDX Vulkan renderer port for Arknights: Endfield";
 
+extern "C" __declspec(dllexport) uint32_t __cdecl
+RenoDX_Streamline_IsHDR10EnabledV1() noexcept {
+  return renodx::games::endfield::streamline::IsHDR10Enabled() ? 1u : 0u;
+}
+
+extern "C" __declspec(dllexport) uint32_t __cdecl
+RenoDX_Streamline_ConvertVulkanTaggedResourceV1(
+    uint32_t abi_version,
+    uint64_t command_buffer,
+    uint64_t source_image_view,
+    uint64_t target_image_view,
+    uint32_t width,
+    uint32_t height) noexcept {
+  if (abi_version != renodx::streamline_bridge::kAbiVersion) return 0u;
+  try {
+    return renodx::games::endfield::streamline::ConvertTaggedResource(
+        command_buffer,
+        source_image_view,
+        target_image_view,
+        width,
+        height)
+        ? 1u
+        : 0u;
+  } catch (...) {
+    return 0u;
+  }
+}
+
+extern "C" __declspec(dllexport) uint32_t __cdecl
+RenoDX_Streamline_ManageVulkanClientImageV1(
+    uint32_t abi_version,
+    uint32_t operation,
+    uint64_t command_buffer,
+    uint64_t image,
+    uint32_t width,
+    uint32_t height,
+    uint32_t native_format) noexcept {
+  if (abi_version != renodx::streamline_bridge::kAbiVersion) return 0u;
+  try {
+    return renodx::games::endfield::streamline::ManageClientImage(
+        operation,
+        command_buffer,
+        image,
+        width,
+        height,
+        native_format)
+        ? 1u
+        : 0u;
+  } catch (...) {
+    return 0u;
+  }
+}
+
+extern "C" __declspec(dllexport) uint32_t __cdecl
+RenoDX_Streamline_SetVulkanDisplayReadyPQPresentV1(
+    uint32_t abi_version,
+    uint32_t active) noexcept {
+  if (abi_version != renodx::streamline_bridge::kAbiVersion) return 0u;
+  renodx::games::endfield::streamline::SetDisplayReadyPQPresent(active != 0u);
+  return 1u;
+}
+
 BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   if (!IsEndfieldProcess()) return TRUE;
 
@@ -2515,9 +2579,17 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   renodx::utils::settings::Use(fdw_reason, &settings, &OnPresetOff);
   if (fdw_reason == DLL_PROCESS_ATTACH) {
     SetVfxBoostTrackingEnabled(IsVisible(shader_injection.perchannelblowout));
+    renodx::games::endfield::streamline::Configure(
+        __swap_chain_proxy_vertex_shader,
+        __streamline_linear_to_pq_pixel_shader,
+        __streamline_pq_copy_pixel_shader,
+        reinterpret_cast<const float*>(&swap_chain_injection),
+        sizeof(swap_chain_injection) / sizeof(float),
+        &active_swap_chain_encoding);
   }
   SyncSwapChainInjection();
   renodx::mods::swapchain::Use(fdw_reason, &swap_chain_injection);
+  renodx::games::endfield::streamline::UseEvents(fdw_reason);
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
   renodx::utils::state::Use(fdw_reason);
   renodx::utils::random::binds.push_back(&shader_injection.custom_random);

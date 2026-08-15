@@ -1,11 +1,11 @@
 [submodule "external/reshade"]
   path = external/reshade
-  url = https://github.com/crosire/reshade
+	url = https://github.com/crosire/reshade
 
 [submodule "external/Streamline"]
   path = external/Streamline
-  url = https://github.com/clshortfuse/Streamline.git
-  branch = patch-1
+	url = https://github.com/ItsTheSewerRat/Streamline.git
+	branch = endfield-vk-fg
 
 [submodule "external/gtl"]
   path = external/gtl
