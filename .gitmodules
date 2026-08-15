@@ -1,6 +1,7 @@
 [submodule "external/reshade"]
   path = external/reshade
-	url = https://github.com/crosire/reshade
+	url = https://github.com/ItsTheSewerRat/reshade.git
+	branch = endfield-vk-fg
 
 [submodule "external/Streamline"]
   path = external/Streamline
