@@ -17,15 +17,7 @@ static uint _389 = 0u;
 static const int2 _356[6] = { int2(2, 1), int2(2, 1), int2(0, 2), int2(0, 2), int2(0, 1), int2(0, 1) };
 static const float2 _357[6] = { float2(-1.0f, 1.0f), 1.0f.xx, float2(1.0f, -1.0f), 1.0f.xx, 1.0f.xx, float2(-1.0f, 1.0f) };
 
-[[vk::binding(0, 4)]]
-cbuffer RenoDXInject : register(b0, space4)
-{
-    float4 renodx_values[15] : packoffset(c0);
-};
-
-#define RENODX_CUSTOM_FOG renodx_values[12].y
-#define RENODX_CUBEMAP_AMBIENT renodx_values[13].y
-#define RENODX_IMPROVED_GTAO renodx_values[14].z
+#include "./renodx_injection.hlsli"
 
 [[vk::binding(36, 3)]]
 cbuffer _6_7 : register(b36)

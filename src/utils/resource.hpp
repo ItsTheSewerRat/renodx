@@ -1134,7 +1134,6 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
       switch (resource_desc.type) {
         case reshade::api::resource_type::buffer:
           new_desc.type = reshade::api::resource_view_type::buffer;
-          new_desc.format = reshade::api::format::unknown;
           break;
         case reshade::api::resource_type::texture_1d:
           if (resource_desc.texture.depth_or_layers > 1) {
@@ -1142,8 +1141,8 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
           } else {
             new_desc.type = reshade::api::resource_view_type::texture_1d;
           }
-          new_desc.texture.level_count = UINT32_MAX;
-          new_desc.texture.layer_count = resource_desc.texture.depth_or_layers;
+          new_desc.texture.levels = UINT32_MAX;
+          new_desc.texture.layers = resource_desc.texture.depth_or_layers;
           if (new_desc.format == reshade::api::format::unknown) {
             new_desc.format = resource_desc.texture.format;
           }
@@ -1152,12 +1151,12 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
         case reshade::api::resource_type::texture_2d:
           switch (usage_type) {
             case reshade::api::resource_usage::unordered_access:
-              new_desc.texture.level_count = 1;
+              new_desc.texture.levels = 1;
               break;
             default:
-              new_desc.texture.level_count = UINT32_MAX;
+              new_desc.texture.levels = UINT32_MAX;
           }
-          new_desc.texture.layer_count = resource_desc.texture.depth_or_layers;
+          new_desc.texture.layers = resource_desc.texture.depth_or_layers;
           if (resource_desc.texture.depth_or_layers > 1) {
             if (resource_desc.texture.samples > 1) {
               new_desc.type = reshade::api::resource_view_type::texture_2d_multisample_array;
@@ -1182,8 +1181,8 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
           if (new_desc.format == reshade::api::format::unknown) {
             new_desc.format = resource_desc.texture.format;
           }
-          new_desc.texture.level_count = UINT32_MAX;
-          new_desc.texture.layer_count = UINT32_MAX;
+          new_desc.texture.levels = UINT32_MAX;
+          new_desc.texture.layers = UINT32_MAX;
           break;
         case reshade::api::resource_type::unknown:
         default:
@@ -1204,8 +1203,8 @@ inline reshade::api::resource_view_desc PopulateUnknownResourceViewDesc(
       ", type: ", desc.type, " => ", new_desc.type,
       ", first_layer: ", desc.texture.first_layer, " => ", new_desc.texture.first_layer,
       ", first_level: ", desc.texture.first_level, " => ", new_desc.texture.first_level,
-      ", layer_count: ", desc.texture.layer_count, " => ", new_desc.texture.layer_count,
-      ", level_count: ", desc.texture.level_count, " => ", new_desc.texture.level_count,
+      ", layers: ", desc.texture.layers, " => ", new_desc.texture.layers,
+      ", levels: ", desc.texture.levels, " => ", new_desc.texture.levels,
       ")");
 #endif
   return new_desc;

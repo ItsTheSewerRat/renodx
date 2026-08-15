@@ -22,6 +22,8 @@
 #include <deps/imgui/imgui.h>
 #include <include/reshade.hpp>
 
+static_assert(RESHADE_API_VERSION >= 20, "Endfield Vulkan requires ReShade API 20 or newer");
+
 #include <embed/shaders.h>
 
 #include "../../mods/shader.hpp"
@@ -104,7 +106,11 @@ void OnBindVfxDescriptorTables(
     reshade::api::pipeline_layout,
     uint32_t first,
     uint32_t count,
-    const reshade::api::descriptor_table* tables) {
+    const reshade::api::descriptor_table* tables,
+    uint32_t dynamic_offset_count,
+    const uint32_t* dynamic_offsets) {
+  (void)dynamic_offset_count;
+  (void)dynamic_offsets;
   if (stages != reshade::api::shader_stage::all_graphics
       || first > 1u
       || first + count <= 1u) {

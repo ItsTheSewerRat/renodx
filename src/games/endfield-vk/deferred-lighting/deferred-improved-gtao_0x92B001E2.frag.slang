@@ -14,15 +14,7 @@ struct _26
 static float _354 = 0.0f;
 static uint _355 = 0u;
 
-[[vk::binding(0, 4)]]
-cbuffer RenoDXInject : register(b0, space4)
-{
-    float4 renodx_values[15] : packoffset(c0);
-};
-
-#define RENODX_CUSTOM_FOG renodx_values[12].y
-#define RENODX_CUBEMAP_AMBIENT renodx_values[13].y
-#define RENODX_IMPROVED_GTAO renodx_values[14].z
+#include "./renodx_injection.hlsli"
 [[vk::binding(33, 3)]]
 cbuffer _6_7 : register(b33)
 {

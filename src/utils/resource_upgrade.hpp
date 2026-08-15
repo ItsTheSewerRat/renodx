@@ -2999,7 +2999,9 @@ inline void OnBindDescriptorTables(
     reshade::api::pipeline_layout layout,
     uint32_t first,
     uint32_t count,
-    const reshade::api::descriptor_table* tables) {
+    const reshade::api::descriptor_table* tables,
+    uint32_t dynamic_offset_count,
+    const uint32_t* dynamic_offsets) {
   if (count == 0u) return;
   if (layout == 0u) return;
 #ifdef DEBUG_LEVEL_2
@@ -3141,7 +3143,9 @@ inline void OnBindDescriptorTables(
     s << "utils::resource::upgrade::OnBindDescriptorTables(apply bind)";
     reshade::log::message(reshade::log::level::debug, s.str().c_str());
 #endif
-    cmd_list->bind_descriptor_tables(stages, layout, first, count, new_tables);
+    cmd_list->bind_descriptor_tables2(
+        stages, layout, first, count, new_tables,
+        dynamic_offset_count, dynamic_offsets);
     free(new_tables);
   } else if (built_new_tables) {
 #ifdef DEBUG_LEVEL_1

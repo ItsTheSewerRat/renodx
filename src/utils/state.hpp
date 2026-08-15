@@ -298,7 +298,11 @@ static void OnBindDescriptorTables(reshade::api::command_list* cmd_list,
                                    reshade::api::shader_stage stages,
                                    reshade::api::pipeline_layout layout,
                                    uint32_t first, uint32_t count,
-                                   const reshade::api::descriptor_table* tables) {
+                                   const reshade::api::descriptor_table* tables,
+                                   uint32_t dynamic_offset_count,
+                                   const uint32_t* dynamic_offsets) {
+  (void)dynamic_offset_count;
+  (void)dynamic_offsets;
   auto* data = renodx::utils::data::Get<CommandListData>(cmd_list);
   if (data == nullptr) return;
   auto& current_state = data->current_state;
