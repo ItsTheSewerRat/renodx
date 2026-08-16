@@ -2587,7 +2587,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     renodx::games::endfield::streamline::Configure(
         __swap_chain_proxy_vertex_shader,
         __streamline_linear_to_pq_pixel_shader,
-        __streamline_pq_copy_pixel_shader,
         reinterpret_cast<const float*>(&swap_chain_injection),
         sizeof(swap_chain_injection) / sizeof(float),
         &active_swap_chain_encoding);

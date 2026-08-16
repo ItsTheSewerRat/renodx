@@ -30,11 +30,11 @@ inline reshade::api::format render_target_format =
     reshade::api::format::unknown;
 inline std::span<const uint8_t> vertex_shader;
 inline std::span<const uint8_t> pixel_shader;
-inline std::span<const uint8_t> pq_copy_pixel_shader;
 inline const float* push_constants = nullptr;
 inline size_t push_constant_count = 0u;
 inline const float* output_encoding = nullptr;
 inline thread_local uint32_t display_ready_pq_present_depth = 0u;
+inline thread_local bool outer_conversion_in_progress = false;
 
 inline renodx::utils::resource::ResourceUpgradeInfo client_sdr_upgrade_target = {
     .old_format = reshade::api::format::r8g8b8a8_unorm,
@@ -71,6 +71,8 @@ struct ClientImageState {
   bool clone_active = false;
   bool pass_initialized = false;
   bool display_pass_initialized = false;
+  bool pq_render_target_exempt = false;
+  bool display_render_target_exempt = false;
   renodx::utils::render::RenderPass pq_pass;
   renodx::utils::render::RenderPass display_pass;
 };
@@ -80,13 +82,11 @@ inline std::unordered_map<uint64_t, std::unique_ptr<ClientImageState>>
 inline void Configure(
     std::span<const uint8_t> new_vertex_shader,
     std::span<const uint8_t> new_pixel_shader,
-    std::span<const uint8_t> new_pq_copy_pixel_shader,
     const float* new_push_constants,
     size_t new_push_constant_count,
     const float* new_output_encoding) {
   vertex_shader = new_vertex_shader;
   pixel_shader = new_pixel_shader;
-  pq_copy_pixel_shader = new_pq_copy_pixel_shader;
   push_constants = new_push_constants;
   push_constant_count = new_push_constant_count;
   output_encoding = new_output_encoding;
@@ -160,6 +160,17 @@ inline void OnPresent(
   if (display_ready_pq_present_depth != 0u
       && queue->get_device()->get_api() == reshade::api::device_api::vulkan) {
     return;
+  }
+  {
+    std::lock_guard lock(mutex);
+    const auto found = client_images.find(
+        swapchain->get_current_back_buffer().handle);
+    if (found != client_images.end()
+        && found->second->original_format
+            == reshade::api::format::r10g10b10a2_unorm
+        && !found->second->clone_active) {
+      return;
+    }
   }
   renodx::mods::swapchain::v2::OnPresent(
       queue,
@@ -281,6 +292,8 @@ inline bool RegisterClientImage(
     state->display_pass = {};
     state->pass_initialized = false;
     state->display_pass_initialized = false;
+    state->pq_render_target_exempt = false;
+    state->display_render_target_exempt = false;
   }
   state->device = device;
   state->original = original;
@@ -298,6 +311,7 @@ inline bool RenderClientImage(
     ClientImageState* state,
     renodx::utils::render::RenderPass* pass,
     bool* pass_initialized,
+    bool* render_target_exempt,
     std::span<const uint8_t> conversion_shader,
     bool bind_push_constants) {
   if (cmd_list == nullptr || state == nullptr
@@ -306,6 +320,7 @@ inline bool RenderClientImage(
       || state->original_format == reshade::api::format::unknown
       || state->width == 0u || state->height == 0u
       || pass == nullptr || pass_initialized == nullptr
+      || render_target_exempt == nullptr
       || conversion_shader.empty()
       || (bind_push_constants && push_constants == nullptr)) {
     return false;
@@ -364,6 +379,28 @@ inline bool RenderClientImage(
       static_cast<uint32_t>(resources.size()),
       resources.data(), old_states.data(), render_states.data());
   const bool rendered = pass->Render(cmd_list);
+  if (rendered && !*render_target_exempt
+      && !pass->render_target_slots.views.empty()) {
+    bool exempted = true;
+    for (const auto view : pass->render_target_slots.views) {
+      exempted = renodx::utils::resource::UpdateResourceViewInfo(
+                     view,
+                     [](renodx::utils::resource::ResourceViewInfo* info) {
+                       if (info->destroyed) return;
+                       info->clone_target = nullptr;
+                       info->clone_enabled = false;
+                       info->clone_can_deactivate = false;
+                     })
+          && exempted;
+      exempted = renodx::utils::resource::UpdateResourceInfo(
+                     state->original,
+                     [view](renodx::utils::resource::ResourceInfo* info) {
+                       info->resource_view_handles.erase(view.handle);
+                     })
+          && exempted;
+    }
+    *render_target_exempt = exempted;
+  }
   cmd_list->barrier(
       static_cast<uint32_t>(resources.size()),
       resources.data(), render_states.data(), old_states.data());
@@ -373,40 +410,104 @@ inline bool RenderClientImage(
 inline bool ConvertClientImage(
     reshade::api::command_list* cmd_list,
     ClientImageState* state) {
-  if (state == nullptr || !state->clone_active
-      || !SetClientCloneActive(state, false)) {
-    return false;
-  }
-  const bool rendered = RenderClientImage(
+  if (state == nullptr) return false;
+  const bool is_sdr =
+      state->original_format == reshade::api::format::r8g8b8a8_unorm;
+  if (!is_sdr) return !state->clone_active;
+  if (!state->clone_active || !SetClientCloneActive(state, false)) return false;
+  const bool converted = RenderClientImage(
       cmd_list,
       state,
       &state->pq_pass,
       &state->pass_initialized,
+      &state->pq_render_target_exempt,
       pixel_shader,
       true);
-  if (!rendered) SetClientCloneActive(state, true);
-  return rendered;
+  if (!converted) SetClientCloneActive(state, true);
+  return converted;
 }
 
 inline bool ConvertDisplayImage(
     reshade::api::command_list* cmd_list,
     ClientImageState* state) {
   if (state == nullptr) return false;
-  if (!state->clone_active && !SetClientCloneActive(state, true)) return false;
-  if (!SetClientCloneActive(state, false)) return false;
-
   const bool is_sdr =
       state->original_format == reshade::api::format::r8g8b8a8_unorm;
-  const bool rendered = RenderClientImage(
+  if (!is_sdr) return !state->clone_active;
+  if (!state->clone_active && !SetClientCloneActive(state, true)) return false;
+  if (!SetClientCloneActive(state, false)) return false;
+  const bool converted = RenderClientImage(
       cmd_list,
       state,
       &state->display_pass,
       &state->display_pass_initialized,
-      is_sdr ? pixel_shader : pq_copy_pixel_shader,
-      is_sdr);
+      &state->display_render_target_exempt,
+      pixel_shader,
+      true);
   const bool reactivated = SetClientCloneActive(state, true);
-  return rendered && reactivated;
+  return converted && reactivated;
 }
+
+inline void OnBarrier(
+    reshade::api::command_list* cmd_list,
+    uint32_t count,
+    const reshade::api::resource* resources,
+    const reshade::api::resource_usage* old_states,
+    const reshade::api::resource_usage* new_states) {
+  if (outer_conversion_in_progress || cmd_list == nullptr || count == 0u
+      || resources == nullptr || old_states == nullptr || new_states == nullptr
+      || cmd_list->get_device()->get_api()
+          != reshade::api::device_api::vulkan) {
+    return;
+  }
+
+  std::lock_guard lock(mutex);
+  for (uint32_t index = 0u; index < count; ++index) {
+    if (resources[index].handle == 0u
+        || old_states[index] == reshade::api::resource_usage::undefined
+        || old_states[index] == reshade::api::resource_usage::present
+        || new_states[index] != reshade::api::resource_usage::present) {
+      continue;
+    }
+
+    const auto found = client_images.find(resources[index].handle);
+    if (found == client_images.end()) continue;
+    auto* state = found->second.get();
+    if (state->original_format != reshade::api::format::r10g10b10a2_unorm) {
+      continue;
+    }
+
+    if (!state->clone_active || !SetClientCloneActive(state, false)) continue;
+    outer_conversion_in_progress = true;
+    const bool converted = RenderClientImage(
+        cmd_list,
+        state,
+        &state->pq_pass,
+        &state->pass_initialized,
+        &state->pq_render_target_exempt,
+        pixel_shader,
+        true);
+    outer_conversion_in_progress = false;
+
+    if (converted) {
+      static std::once_flag logged;
+      std::call_once(logged, [] {
+        reshade::log::message(
+            reshade::log::level::info,
+            "[RenoDX][client-fp16] Encoded HDR10 on the game's graphics command buffer before DLSS-G");
+      });
+    } else {
+      SetClientCloneActive(state, true);
+      static std::once_flag logged;
+      std::call_once(logged, [] {
+        reshade::log::message(
+            reshade::log::level::error,
+            "[RenoDX][client-fp16] Failed to encode HDR10 before DLSS-G");
+      });
+    }
+  }
+}
+
 inline bool ManageClientImage(
     uint32_t operation,
     uint64_t command_buffer,
@@ -652,6 +753,7 @@ inline void UseEvents(DWORD reason) {
     reshade::register_event<reshade::addon_event::present>(OnPresent);
     reshade::register_event<reshade::addon_event::init_swapchain>(
         OnInitSwapchain);
+    reshade::register_event<reshade::addon_event::barrier>(OnBarrier);
     reshade::register_event<reshade::addon_event::init_command_list>(
         OnInitCommandList);
     reshade::register_event<reshade::addon_event::reset_command_list>(
@@ -666,6 +768,7 @@ inline void UseEvents(DWORD reason) {
     reshade::unregister_event<reshade::addon_event::present>(OnPresent);
     reshade::unregister_event<reshade::addon_event::init_swapchain>(
         OnInitSwapchain);
+    reshade::unregister_event<reshade::addon_event::barrier>(OnBarrier);
     reshade::unregister_event<reshade::addon_event::init_command_list>(
         OnInitCommandList);
     reshade::unregister_event<reshade::addon_event::reset_command_list>(
