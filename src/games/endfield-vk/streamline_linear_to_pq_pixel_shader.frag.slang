@@ -1,6 +1,6 @@
-// Converts RenoDX's final linear FP16 frame into the display-ready HDR10/PQ
-// signal required by DLSS-G. The tagged frame is relative to UI white, matching
-// the regular RenoDX swap-chain path.
+// Converts RenoDX's final linear FP16 frame into the active display encoding
+// required by DLSS-G: SDR code values for RGBA8 or HDR10/PQ for RGB10A2.
+// This matches the regular RenoDX swap-chain output pass.
 struct SwapChainInjectData {
   float peak_white_nits;
   float graphics_white_nits;

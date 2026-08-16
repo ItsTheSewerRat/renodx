@@ -2294,6 +2294,11 @@ RenoDX_Streamline_IsHDR10EnabledV1() noexcept {
 }
 
 extern "C" __declspec(dllexport) uint32_t __cdecl
+RenoDX_Streamline_GetVulkanOutputFormatV1() noexcept {
+  return renodx::games::endfield::streamline::GetVulkanOutputFormat();
+}
+
+extern "C" __declspec(dllexport) uint32_t __cdecl
 RenoDX_Streamline_ConvertVulkanTaggedResourceV1(
     uint32_t abi_version,
     uint64_t command_buffer,
