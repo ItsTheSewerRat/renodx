@@ -2355,6 +2355,15 @@ RenoDX_Streamline_SetVulkanDisplayReadyPQPresentV1(
   return 1u;
 }
 
+extern "C" __declspec(dllexport) uint32_t __cdecl
+RenoDX_Streamline_SetVulkanDLSSGActiveV1(
+    uint32_t abi_version,
+    uint32_t active) noexcept {
+  if (abi_version != renodx::streamline_bridge::kAbiVersion) return 0u;
+  renodx::games::endfield::streamline::SetDLSSGActive(active != 0u);
+  return 1u;
+}
+
 BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   if (!IsEndfieldProcess()) return TRUE;
 
@@ -2587,6 +2596,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
     renodx::games::endfield::streamline::Configure(
         __swap_chain_proxy_vertex_shader,
         __streamline_linear_to_pq_pixel_shader,
+        __streamline_pq_copy_pixel_shader,
         reinterpret_cast<const float*>(&swap_chain_injection),
         sizeof(swap_chain_injection) / sizeof(float),
         &active_swap_chain_encoding);

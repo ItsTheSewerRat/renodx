@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <array>
@@ -12,6 +13,7 @@
 #include <Windows.h>
 #include <include/reshade.hpp>
 #include "../../mods/swapchain.hpp"
+#include "../../utils/draw.hpp"
 #include "../../utils/render.hpp"
 #include "../../utils/resource_upgrade.hpp"
 #include "../../../external/Streamline/source/core/sl.interposer/renodx_streamline_bridge.h"
@@ -30,11 +32,18 @@ inline reshade::api::format render_target_format =
     reshade::api::format::unknown;
 inline std::span<const uint8_t> vertex_shader;
 inline std::span<const uint8_t> pixel_shader;
+inline std::span<const uint8_t> present_copy_pixel_shader;
 inline const float* push_constants = nullptr;
 inline size_t push_constant_count = 0u;
 inline const float* output_encoding = nullptr;
+inline std::atomic_bool dlssg_active = true;
 inline thread_local uint32_t display_ready_pq_present_depth = 0u;
 inline thread_local bool outer_conversion_in_progress = false;
+inline std::mutex present_mutex;
+inline std::unordered_map<
+    uint64_t,
+    std::unique_ptr<renodx::utils::draw::SwapchainProxyPass>>
+    present_passes;
 
 inline renodx::utils::resource::ResourceUpgradeInfo client_sdr_upgrade_target = {
     .old_format = reshade::api::format::r8g8b8a8_unorm,
@@ -70,11 +79,8 @@ struct ClientImageState {
   uint32_t height = 0u;
   bool clone_active = false;
   bool pass_initialized = false;
-  bool display_pass_initialized = false;
   bool pq_render_target_exempt = false;
-  bool display_render_target_exempt = false;
   renodx::utils::render::RenderPass pq_pass;
-  renodx::utils::render::RenderPass display_pass;
 };
 
 inline std::unordered_map<uint64_t, std::unique_ptr<ClientImageState>>
@@ -82,11 +88,13 @@ inline std::unordered_map<uint64_t, std::unique_ptr<ClientImageState>>
 inline void Configure(
     std::span<const uint8_t> new_vertex_shader,
     std::span<const uint8_t> new_pixel_shader,
+    std::span<const uint8_t> new_present_copy_pixel_shader,
     const float* new_push_constants,
     size_t new_push_constant_count,
     const float* new_output_encoding) {
   vertex_shader = new_vertex_shader;
   pixel_shader = new_pixel_shader;
+  present_copy_pixel_shader = new_present_copy_pixel_shader;
   push_constants = new_push_constants;
   push_constant_count = new_push_constant_count;
   output_encoding = new_output_encoding;
@@ -136,17 +144,8 @@ inline void SetDisplayReadyPQPresent(bool active) {
   }
 }
 
-inline void OnInitSwapchain(
-    reshade::api::swapchain* swapchain,
-    bool resize) {
-  (void)resize;
-  if (swapchain == nullptr) return;
-
-  const uint32_t back_buffer_count = swapchain->get_back_buffer_count();
-  for (uint32_t index = 0u; index < back_buffer_count; ++index) {
-    renodx::utils::resource::upgrade::GetResourceClone(
-        swapchain->get_back_buffer(index));
-  }
+inline void SetDLSSGActive(bool active) {
+  dlssg_active.store(active, std::memory_order_release);
 }
 
 inline void OnPresent(
@@ -157,28 +156,44 @@ inline void OnPresent(
     uint32_t dirty_rect_count,
     const reshade::api::rect* dirty_rects) {
   if (queue == nullptr || swapchain == nullptr) return;
-  if (display_ready_pq_present_depth != 0u
-      && queue->get_device()->get_api() == reshade::api::device_api::vulkan) {
+  if (display_ready_pq_present_depth == 0u
+      || queue->get_device()->get_api()
+          != reshade::api::device_api::vulkan) {
+    renodx::mods::swapchain::v2::OnPresent(
+        queue,
+        swapchain,
+        source_rect,
+        dest_rect,
+        dirty_rect_count,
+        dirty_rects);
     return;
   }
-  {
-    std::lock_guard lock(mutex);
-    const auto found = client_images.find(
-        swapchain->get_current_back_buffer().handle);
-    if (found != client_images.end()
-        && found->second->original_format
-            == reshade::api::format::r10g10b10a2_unorm
-        && !found->second->clone_active) {
-      return;
-    }
+  const reshade::api::format output_format =
+      GetOutputFormat(GetVulkanOutputFormat());
+  if (output_format == reshade::api::format::unknown
+      || vertex_shader.empty() || present_copy_pixel_shader.empty()) {
+    return;
   }
-  renodx::mods::swapchain::v2::OnPresent(
-      queue,
-      swapchain,
-      source_rect,
-      dest_rect,
-      dirty_rect_count,
-      dirty_rects);
+
+  std::lock_guard lock(present_mutex);
+  const auto back_buffer = swapchain->get_current_back_buffer();
+  auto& pass = present_passes[back_buffer.handle];
+  if (pass != nullptr && pass->proxy_format != output_format) {
+    pass->Destroy(queue->get_device());
+    pass.reset();
+  }
+  if (pass == nullptr) {
+    pass = std::make_unique<renodx::utils::draw::SwapchainProxyPass>();
+    pass->vertex_shader = vertex_shader;
+    pass->pixel_shader = present_copy_pixel_shader;
+    pass->revert_state = false;
+    pass->use_compatibility_mode = false;
+    pass->proxy_format = output_format;
+  }
+  if (!pass->Render(swapchain, queue)) {
+    pass->Destroy(queue->get_device());
+    present_passes.erase(back_buffer.handle);
+  }
 }
 
 inline bool SetClientCloneActive(ClientImageState* state, bool active) {
@@ -225,9 +240,6 @@ inline bool RegisterClientImage(
   }
 
   const reshade::api::resource original{image};
-  const auto existing = client_images.find(image);
-  const bool clone_active = existing != client_images.end()
-      && existing->second != nullptr && existing->second->clone_active;
   reshade::api::device* device = nullptr;
   std::vector<uint64_t> view_handles;
   bool compatible = false;
@@ -237,7 +249,6 @@ inline bool RegisterClientImage(
        height,
        original_format,
        upgrade_target,
-       clone_active,
        &device,
        &view_handles,
        &compatible](
@@ -253,7 +264,7 @@ inline bool RegisterClientImage(
         }
         device = info->device;
         info->clone_target = upgrade_target;
-        info->clone_enabled = clone_active;
+        info->clone_enabled = true;
         info->clone_can_deactivate = false;
         view_handles.assign(
             info->resource_view_handles.begin(),
@@ -263,14 +274,14 @@ inline bool RegisterClientImage(
   if (!compatible) return false;
 
   renodx::utils::resource::upgrade::UpdateResourceViewsCloneState(
-      view_handles, clone_active, false, upgrade_target);
+      view_handles, true, false, upgrade_target);
   const reshade::api::resource clone =
       renodx::utils::resource::upgrade::GetResourceClone(
           original,
           {
               .require_enabled = false,
               .allow_create = true,
-              .activate = clone_active,
+              .activate = true,
           });
   if (clone.handle == 0u) return false;
 
@@ -286,18 +297,14 @@ inline bool RegisterClientImage(
 
   auto& state = client_images[image];
   if (state == nullptr) state = std::make_unique<ClientImageState>();
-  if ((state->pass_initialized || state->display_pass_initialized)
+  if (state->pass_initialized
       && (state->device != device || state->clone.handle != clone.handle
           || state->original_format != original_format
           || state->width != width || state->height != height)) {
     state->pq_pass.DestroyAll(state->device);
-    state->display_pass.DestroyAll(state->device);
     state->pq_pass = {};
-    state->display_pass = {};
     state->pass_initialized = false;
-    state->display_pass_initialized = false;
     state->pq_render_target_exempt = false;
-    state->display_render_target_exempt = false;
   }
   state->device = device;
   state->original = original;
@@ -306,7 +313,7 @@ inline bool RegisterClientImage(
   state->upgrade_target = upgrade_target;
   state->width = width;
   state->height = height;
-  state->clone_active = clone_active;
+  state->clone_active = true;
   return true;
 }
 
@@ -431,34 +438,14 @@ inline bool ConvertClientImage(
   return converted;
 }
 
-inline bool ConvertDisplayImage(
-    reshade::api::command_list* cmd_list,
-    ClientImageState* state) {
-  if (state == nullptr) return false;
-  const bool is_sdr =
-      state->original_format == reshade::api::format::r8g8b8a8_unorm;
-  if (!is_sdr) return !state->clone_active;
-  if (!state->clone_active && !SetClientCloneActive(state, true)) return false;
-  if (!SetClientCloneActive(state, false)) return false;
-  const bool converted = RenderClientImage(
-      cmd_list,
-      state,
-      &state->display_pass,
-      &state->display_pass_initialized,
-      &state->display_render_target_exempt,
-      pixel_shader,
-      true);
-  const bool reactivated = SetClientCloneActive(state, true);
-  return converted && reactivated;
-}
-
 inline void OnBarrier(
     reshade::api::command_list* cmd_list,
     uint32_t count,
     const reshade::api::resource* resources,
     const reshade::api::resource_usage* old_states,
     const reshade::api::resource_usage* new_states) {
-  if (outer_conversion_in_progress || cmd_list == nullptr || count == 0u
+  if (!dlssg_active.load(std::memory_order_acquire)
+      || outer_conversion_in_progress || cmd_list == nullptr || count == 0u
       || resources == nullptr || old_states == nullptr || new_states == nullptr
       || cmd_list->get_device()->get_api()
           != reshade::api::device_api::vulkan) {
@@ -523,58 +510,6 @@ inline bool ManageClientImage(
   if (operation == renodx::streamline_bridge::kClientImageOperationRegister) {
     return command_buffer == 0u
         && RegisterClientImage(image, width, height, native_format);
-  }
-
-  if (operation
-      == renodx::streamline_bridge::kClientImageOperationConvertDisplay) {
-    if (command_buffer == 0u) return false;
-    const auto command_list = command_lists.find(command_buffer);
-    if (command_list == command_lists.end()) return false;
-
-    auto found = client_images.find(image);
-    if (found == client_images.end()) {
-      uint32_t display_width = 0u;
-      uint32_t display_height = 0u;
-      uint32_t display_format = 0u;
-      const bool compatible = renodx::utils::resource::GetResourceInfo(
-          reshade::api::resource{image},
-          [&display_width, &display_height, &display_format](
-              const renodx::utils::resource::ResourceInfo& info) {
-            const reshade::api::format original_format =
-                reshade::api::format_to_default_typed(
-                    info.desc.texture.format, 0);
-            if (info.destroyed || !info.is_swap_chain
-                || info.desc.type != reshade::api::resource_type::texture_2d
-                || info.clone.handle == 0u
-                || info.clone_desc.type
-                    != reshade::api::resource_type::texture_2d
-                || (original_format != reshade::api::format::r8g8b8a8_unorm
-                    && original_format
-                        != reshade::api::format::r10g10b10a2_unorm)
-                || reshade::api::format_to_default_typed(
-                       info.clone_desc.texture.format, 0)
-                    != reshade::api::format::r16g16b16a16_float) {
-              return;
-            }
-            display_width = info.desc.texture.width;
-            display_height = info.desc.texture.height;
-            display_format = original_format
-                    == reshade::api::format::r8g8b8a8_unorm
-                ? kVkFormatR8G8B8A8Unorm
-                : kVkFormatA2B10G10R10UnormPack32;
-          });
-      if (!compatible || display_width == 0u || display_height == 0u
-          || !RegisterClientImage(
-              image,
-              display_width,
-              display_height,
-              display_format)) {
-        return false;
-      }
-      found = client_images.find(image);
-      if (found == client_images.end()) return false;
-    }
-    return ConvertDisplayImage(command_list->second, found->second.get());
   }
 
   const auto found = client_images.find(image);
@@ -719,6 +654,13 @@ inline void OnDestroyCommandList(reshade::api::command_list* cmd_list) {
 }
 
 inline void OnDestroyDevice(reshade::api::device* device) {
+  {
+    std::lock_guard lock(present_mutex);
+    for (auto& [handle, pass] : present_passes) {
+      pass->Destroy(device);
+    }
+    present_passes.clear();
+  }
   std::lock_guard lock(mutex);
   command_lists.clear();
   if (render_device == device) {
@@ -734,7 +676,6 @@ inline void OnDestroyDevice(reshade::api::device* device) {
       continue;
     }
     it->second->pq_pass.DestroyAll(device);
-    it->second->display_pass.DestroyAll(device);
     it = client_images.erase(it);
   }
 }
@@ -746,7 +687,6 @@ inline void OnDestroyResource(
   const auto found = client_images.find(resource.handle);
   if (found == client_images.end()) return;
   found->second->pq_pass.DestroyAll(device);
-  found->second->display_pass.DestroyAll(device);
   client_images.erase(found);
 }
 
@@ -755,8 +695,6 @@ inline void UseEvents(DWORD reason) {
     reshade::unregister_event<reshade::addon_event::present>(
         renodx::mods::swapchain::v2::OnPresent);
     reshade::register_event<reshade::addon_event::present>(OnPresent);
-    reshade::register_event<reshade::addon_event::init_swapchain>(
-        OnInitSwapchain);
     reshade::register_event<reshade::addon_event::barrier>(OnBarrier);
     reshade::register_event<reshade::addon_event::init_command_list>(
         OnInitCommandList);
@@ -770,8 +708,6 @@ inline void UseEvents(DWORD reason) {
         OnDestroyResource);
   } else if (reason == DLL_PROCESS_DETACH) {
     reshade::unregister_event<reshade::addon_event::present>(OnPresent);
-    reshade::unregister_event<reshade::addon_event::init_swapchain>(
-        OnInitSwapchain);
     reshade::unregister_event<reshade::addon_event::barrier>(OnBarrier);
     reshade::unregister_event<reshade::addon_event::init_command_list>(
         OnInitCommandList);
