@@ -240,6 +240,9 @@ inline bool RegisterClientImage(
   }
 
   const reshade::api::resource original{image};
+  const auto existing = client_images.find(image);
+  const bool clone_active = existing != client_images.end()
+      && existing->second != nullptr && existing->second->clone_active;
   reshade::api::device* device = nullptr;
   std::vector<uint64_t> view_handles;
   bool compatible = false;
@@ -249,6 +252,7 @@ inline bool RegisterClientImage(
        height,
        original_format,
        upgrade_target,
+       clone_active,
        &device,
        &view_handles,
        &compatible](
@@ -264,7 +268,7 @@ inline bool RegisterClientImage(
         }
         device = info->device;
         info->clone_target = upgrade_target;
-        info->clone_enabled = true;
+        info->clone_enabled = clone_active;
         info->clone_can_deactivate = false;
         view_handles.assign(
             info->resource_view_handles.begin(),
@@ -274,14 +278,14 @@ inline bool RegisterClientImage(
   if (!compatible) return false;
 
   renodx::utils::resource::upgrade::UpdateResourceViewsCloneState(
-      view_handles, true, false, upgrade_target);
+      view_handles, clone_active, false, upgrade_target);
   const reshade::api::resource clone =
       renodx::utils::resource::upgrade::GetResourceClone(
           original,
           {
               .require_enabled = false,
               .allow_create = true,
-              .activate = true,
+              .activate = clone_active,
           });
   if (clone.handle == 0u) return false;
 
@@ -313,7 +317,7 @@ inline bool RegisterClientImage(
   state->upgrade_target = upgrade_target;
   state->width = width;
   state->height = height;
-  state->clone_active = true;
+  state->clone_active = clone_active;
   return true;
 }
 
