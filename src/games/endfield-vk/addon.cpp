@@ -31,7 +31,6 @@ static_assert(RESHADE_API_VERSION >= 20, "Endfield Vulkan requires ReShade API 2
 #include "../../utils/bitwise.hpp"
 #include "../../utils/data.hpp"
 #include "../../utils/hash.hpp"
-#include "../../utils/random.hpp"
 #include "../../utils/resource.hpp"
 #include "../../utils/settings.hpp"
 #include "../../utils/state.hpp"
@@ -2182,6 +2181,10 @@ void OnPresent(reshade::api::command_queue* queue,
                const reshade::api::rect* dest_rect,
                uint32_t dirty_rect_count,
                const reshade::api::rect* dirty_rects) {
+  static uint32_t random_state = 0x9E3779B9u;
+  random_state = random_state * 1664525u + 1013904223u;
+  shader_injection.custom_random = static_cast<float>(random_state >> 8u) / 16777216.f;
+
   ProcessPendingVfxTextureReadback(queue);
 
   auto* device = queue->get_device();
@@ -2287,6 +2290,7 @@ extern "C" __declspec(dllexport) constexpr const char* NAME = "RenoDX: Arknights
 extern "C" __declspec(dllexport) constexpr const char* DESCRIPTION = "RenoDX Vulkan renderer port for Arknights: Endfield";
 
 BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
+  if (fdw_reason == DLL_THREAD_ATTACH || fdw_reason == DLL_THREAD_DETACH) return TRUE;
   if (!IsEndfieldProcess()) return TRUE;
 
   switch (fdw_reason) {
@@ -2520,8 +2524,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
   renodx::mods::swapchain::Use(fdw_reason, &swap_chain_injection);
   renodx::mods::shader::Use(fdw_reason, custom_shaders, &shader_injection);
   renodx::utils::state::Use(fdw_reason);
-  renodx::utils::random::binds.push_back(&shader_injection.custom_random);
-  renodx::utils::random::Use(fdw_reason);
 
   if (fdw_reason == DLL_PROCESS_DETACH) {
     reshade::unregister_addon(h_module);
