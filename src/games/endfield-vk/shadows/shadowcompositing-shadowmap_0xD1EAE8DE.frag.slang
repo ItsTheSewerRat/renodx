@@ -183,10 +183,12 @@ void main(
           bitmask.x = ((~(-1 << 2)) << 0) & 0xffffffff;  r0.x = (((uint)r0.y << 0) & bitmask.x) | ((uint)r0.x & ~bitmask.x);
           r0.y = dot(cb3[33].xyzw, icb[r0.z+0].xyzw);
 
+          // RenoDX code start: scale cascade sampling for the user-selected shadow hardening.
           r0.y *= lerp(
               1.0,
               lerp(0.75, 1.5, saturate((float)r0.z / 3.0)),
               saturate(SHADOW_HARDENING));
+          // RenoDX code end
           r0.zw = icb[r0.x+4].xy * float2(1,-1);
           r3.xy = float2(0,0);
           r1.z = 0;
@@ -383,6 +385,7 @@ void main(
       r0.y = r0.y * r0.w + r0.z;
       r0.y = -1 + r0.y;
       r0.y = cb1[95].z * r0.y + 1;
+      // RenoDX code: scale the game's cloud-shadow contribution with the fake-cloud-shadow control.
       r0.x *= lerp(1.0, r0.y, saturate(FAKE_CLOUD_SHADOWS));
     }
     r0.y = cb3[35].z + -r0.x;
@@ -392,10 +395,12 @@ void main(
   }
   r0.x = min(1, r0.x);
 
+  // RenoDX code start: apply user-controlled smoothstep hardening to the vanilla shadow result.
   r0.x = lerp(
       r0.x,
       r0.x * r0.x * (3.0 - 2.0 * r0.x),
       saturate(SHADOW_HARDENING));
+  // RenoDX code end
 
   r0.x = -1 + r0.x;
   o0.x = cb3[34].x * r0.x + 1;

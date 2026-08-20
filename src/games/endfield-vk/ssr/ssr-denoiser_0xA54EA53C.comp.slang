@@ -121,9 +121,11 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r0.xyz = r0.xyz * float3(0.111111112,0.111111112,0.111111112) + -r13.xyz;
   r0.xyz = sqrt(r0.xyz);
 
-  // Variance multiplier: wider = more history survives the clamp = less shimmer
-  // Vanilla is 1.25. In Reduced mode, widen to 2.0 for stability.
-
+  /*
+  Vanilla shader code from 0xA54EA53C:
+  float3 _192 = sqrt((_99 * 0.111111111938953399658203125f.xxx) - (_182 * _182)) * 1.25f;
+  */
+  // RenoDX code: widen the history clamp when Improved SSR is enabled to reduce shimmer.
   float variance_mult = (shader_injection.improved_ssr >= 0.5f) ? 2.0f : 1.25f;
   r0.xyz = variance_mult * r0.xyz;
   r13.xyz = r12.xyz * float3(0.111111112,0.111111112,0.111111112) + -r0.xyz;
@@ -165,8 +167,9 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r2.xy = -r2.xy * r2.zw + r9.xy;
   r0.w = t2.SampleLevel(s0_s, r9.xy, 0).x;
   r0.w = 0.899999976 * r0.w;
+  // RenoDX code: select stabilized history sampling when Improved SSR is enabled.
   if (shader_injection.improved_ssr >= 0.5f) {
-    // Manual bilinear interpolation for history color
+    // RenoDX code start: bilinearly sample the previous SSR color.
     float2 texelPos = r2.xy * cb0[0].xy - 0.5;
     float2 f = frac(texelPos);
     float2 base = (floor(texelPos) + 0.5) * cb0[0].zw;
@@ -175,6 +178,7 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
     float3 h01 = t3.SampleLevel(s0_s, base + float2(0, cb0[0].w), 0).xyz;
     float3 h11 = t3.SampleLevel(s0_s, base + cb0[0].zw, 0).xyz;
     r2.xyz = lerp(lerp(h00, h10, f.x), lerp(h01, h11, f.x), f.y);
+    // RenoDX code end
   } else {
     r2.xyz = t3.SampleLevel(s0_s, r2.xy, 0).xyz;
   }

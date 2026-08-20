@@ -80,7 +80,9 @@ void main(
   r3.y = saturate(r1.z * 10 + 1);
   r3.z = saturate(dot(-cb2[44].xyz, -r1.yzw));  // Sun-view alignment (1 = looking at sun)
   r3.z = log2(r3.z);
+  // RenoDX code: enlarge the sun disk when the improved sun option is enabled.
   float sunSizeMultiplier = (SUN_INTENSITY > 0.5f) ? 5.0f : 1.0f;
+  // RenoDX code: apply the user-selected sun-size multiplier to the retained exponent.
   r3.z = cb2[43].x * sunSizeMultiplier * r3.z;   // Apply sun size exponent
   r3.z = exp2(r3.z);
   r3.w = r3.z * r3.z + 1;    // Soft falloff numerator
@@ -200,6 +202,7 @@ void main(
   r5.yzw = cb2[43].www * r5.yzw;   // Sun intensity multiplier
   r5.yzw = cb2[44].www * r5.yzw;   // Sun shadow/occlusion
   r5.yzw = max(float3(0,0,0), r5.yzw);
+  // RenoDX code start: add the improved sun core, limb darkening, and horizon tint.
   if (SUN_INTENSITY > 0.5f) {
     float sunDot = saturate(dot(-cb2[44].xyz, -r1.yzw));
 
@@ -247,6 +250,7 @@ void main(
   } else {
     r5.yzw = min(float3(3,3,3), r5.yzw);
   }
+  // RenoDX code end
 
   r2.yzw = r2.yzw * r3.yyy + r5.yzw;
   r3.yzw = r4.xyz * r3.xxx + -r2.yzw;

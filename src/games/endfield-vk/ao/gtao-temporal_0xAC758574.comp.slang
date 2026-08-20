@@ -39,9 +39,9 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r1.xy = (int2)r1.xy;
   r1.xy = r1.zw * r1.xy;
   r1.zw = r0.xy * cb0[4].zw + -r1.xy;
+  // RenoDX code: select stabilized AO history sampling when Improved GTAO is enabled.
   if (IMPROVED_GTAO >= 0.5) {
-    // Manual bilinear interpolation for previous AO (reduces wobble/ghosting)
-    // Only interpolate AO (.x), keep depth (.y) point-sampled
+    // RenoDX code start: bilinearly sample AO history while keeping depth point-sampled.
     float2 texelPos = r1.zw * cb0[4].xy - 0.5;
     float2 f = frac(texelPos);
     float2 base = (floor(texelPos) + 0.5) * cb0[4].zw;
@@ -51,6 +51,7 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
     float ao11 = t3.SampleLevel(s0_s, base + cb0[4].zw, 0).x;
     r2.x = lerp(lerp(ao00, ao10, f.x), lerp(ao01, ao11, f.x), f.y);
     r2.y = t3.SampleLevel(s0_s, r1.zw, 0).y; // depth: point-sampled
+    // RenoDX code end
   } else {
     r2.xy = t3.SampleLevel(s0_s, r1.zw, 0).xy;
   }
@@ -113,9 +114,11 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
     r0.x = r0.x + -r3.x;
     r3.x = r3.z * r0.x + r3.x;
   }
+  // RenoDX code start: bypass game AO when requested by the addon.
   if (shader_injection.disable_game_ao >= 0.5f) {
     r3.x = 1.0f;
   }
+  // RenoDX code end
   r3.w = 0;
   u0[vThreadID.xy] = r3.xyzw;
   return;

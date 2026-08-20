@@ -976,6 +976,11 @@ void frag_main()
         float _2088 = min(0.999000012874603271484375f, 0.4092549979686737060546875f + (_2081 * (1.04997003078460693359375f + (_2081 * ((-0.076194703578948974609375f) - (0.38302600383758544921875f * _2081))))));
         float _2089 = 1.0f - _2088;
         float3 _2092 = _705 + ((1.0f.xxx - _705) * 0.0476190485060214996337890625f);
+        /*
+         Vanilla shader code from 0x70B436EE:
+        float3 _2108 = ((clamp((min(((_705 * (1.0f - _2057)) + _2057.xxx) * ((_2030 / (_2051 * _2051)) * (0.5f / (((_2023 * sqrt(((((-_2028) * _2030) + _2028) * _2028) + _2030)) + (_2028 * sqrt(((((-_2023) * _2030) + _2023) * _2023) + _2030))) + 9.9999997473787516355514526367188e-05f))), 2048.0f.xxx) + (((_2092 * (((_56.SampleLevel(_23, (float2(_2028, _552) * 0.96875f) + 0.015625f.xx, 0.0f).x * _56.SampleLevel(_23, (float2(_2023, _552) * 0.96875f) + 0.015625f.xx, 0.0f).x) * _2088) / _2089)) * _2092) / (1.0f.xxx - (_2092 * _2089)))) * _46_m4.x, 0.0f.xxx, 1000.0f.xxx) * _2023) + ((_701 * 1.0f) * _2023)) * _46_m1.xyz;
+        */
+        // RenoDX code: reduce opaque glass lighting terms when the glass transparency improvement is enabled.
         float3 _2108 = (((clamp((min(((_705 * (1.0f - _2057)) + _2057.xxx) * ((_2030 / (_2051 * _2051)) * (0.5f / (((_2023 * sqrt(((((-_2028) * _2030) + _2028) * _2028) + _2030)) + (_2028 * sqrt(((((-_2023) * _2030) + _2023) * _2023) + _2030))) + 9.9999997473787516355514526367188e-05f))), 2048.0f.xxx) + (((_2092 * (((_56.SampleLevel(_23, (float2(_2028, _552) * 0.96875f) + 0.015625f.xx, 0.0f).x * _56.SampleLevel(_23, (float2(_2023, _552) * 0.96875f) + 0.015625f.xx, 0.0f).x) * _2088) / _2089)) * _2092) / (1.0f.xxx - (_2092 * _2089)))) * _46_m4.x, 0.0f.xxx, 1000.0f.xxx) * (GLASS_TRANSPARENCY > 0.5f ? 0.5f : 1.0f)) * _2023) + ((_701 * 1.0f) * _2023)) * _46_m1.xyz;
         float3 _2119 = lerp(_2108, _2108 * _53.SampleBias(_23, float2(_1986, 0.5f), _18_m16).xyz, (1.0f - _1986).xxx) * 1.0f;
         _2121 = float4(_2119.x, _2119.y, _2119.z, 0.0f.xxxx.w);
@@ -1443,6 +1448,11 @@ void frag_main()
         }
         _2147 = _2146 + _2174;
     }
+    /*
+     Vanilla shader code from 0x70B436EE:
+    float3 _3407 = (((((float3(_1167, _1172, _1177) * _701) * lerp(1.0f, _523, _39_m4)) * _18_m22.x) + ((((_1460 * _18_m23.z) * _18_m22.y) * ((_705 * _720.x) + (clamp(50.0f * _705.y, 0.0f, 1.0f) * _720.y).xxx)) * 1.0f)) + (((lerp(0.0f.xxx, (lerp(_39_m54.xyz, _21_m0[_11]._m7.xyz, _21_m0[_11]._m7.w.xxx) * _580) * _39_m55, _570.xxx) * lerp(_608, 1.0f.xxx, _39_m47.xxx)) * (1.0f - _21_m0[_11]._m5.x)) * ((1.0f - _39_m46) + (_18_m20.y * _39_m46)))) + (_2121.xyz + (_2146 * _2149)).xyz;
+    */
+    // RenoDX code: reduce opaque glass lighting terms when the glass transparency improvement is enabled.
     float3 _3407 = (((((float3(_1167, _1172, _1177) * (_701 * (GLASS_TRANSPARENCY > 0.5f ? 0.65f : 1.0f))) * lerp(1.0f, _523, _39_m4)) * _18_m22.x) + (((((_1460 * (GLASS_TRANSPARENCY > 0.5f ? 0.4f : 1.0f)) * _18_m23.z) * _18_m22.y) * ((_705 * _720.x) + (clamp(50.0f * _705.y, 0.0f, 1.0f) * _720.y).xxx)) * 1.0f)) + (((lerp(0.0f.xxx, (lerp(_39_m54.xyz, _21_m0[_11]._m7.xyz, _21_m0[_11]._m7.w.xxx) * _580) * _39_m55, _570.xxx) * lerp(_608, 1.0f.xxx, _39_m47.xxx)) * (1.0f - _21_m0[_11]._m5.x)) * ((1.0f - _39_m46) + (_18_m20.y * _39_m46)))) + (_2121.xyz + ((_2146 * (GLASS_TRANSPARENCY > 0.5f ? 0.5f : 1.0f)) * _2149)).xyz;
     float4 _3408 = float4(_3407.x, _3407.y, _3407.z, _370.w);
     _3408.w = _547;
@@ -1492,12 +1502,24 @@ void frag_main()
         _3787 = (_18_m51.xyz * (1.0f - _3563)) + (((_18_m54.xyz * pow(clamp(dot(_469, _18_m53.xyz), 0.0f, 1.0f), _18_m54.w)) * (1.0f - clamp(exp2(-(_3538 * max(_470 - _18_m53.w, 0.0f))), 0.0f, 1.0f))) * (1.0f - _3560));
         _3788 = _3563;
     }
+    // RenoDX replaces the game's vanilla fog composite with the selected glass/fog improvement.
+    /*
+    Vanilla shader code from 0x70B436EE:
+    float3 _3798 = lerp(_655.xyz, ((_3408.xyz * (_3444 * _3788)) + ((((clamp(((_18_m46.xyz * (0.0596831031143665313720703125f * (1.0f + (_3447 * _3447)))) + _18_m48.xyz) + (_18_m47.xyz * ((1.0f - _3453) / max((12.56637096405029296875f * _3457) * sqrt(_3457), 0.001000000047497451305389404296875f))), 0.0f.xxx, 1.0f.xxx) * 255.0f) * (1.0f.xxx - _3444)) * _3788) + _3787)).xyz, _547.xxx).xyz;
+    */
+    // RenoDX code start: apply improved glass and the selected hue-preserving fog blend.
     float3 _3798 = lerp(_655.xyz, ((_3408.xyz * (FOG_MODIFICATION > 0.5f ? (0.35f + 0.65f * (_3444 * _3788)) : (_3444 * _3788))) + ((((clamp(((_18_m46.xyz * (0.0596831031143665313720703125f * (1.0f + (_3447 * _3447)))) + _18_m48.xyz) + (_18_m47.xyz * ((1.0f - _3453) / max((12.56637096405029296875f * _3457) * sqrt(_3457), 0.001000000047497451305389404296875f))), 0.0f.xxx, 1.0f.xxx) * 255.0f) * (1.0f.xxx - _3444)) * _3788 * (FOG_MODIFICATION > 0.5f ? 0.65f : 1.0f)) + (_3787 * (FOG_MODIFICATION > 0.5f ? 0.65f : 1.0f)))).xyz, _547.xxx).xyz;
+    // RenoDX code end
     float3 _3808 = lerp(dot(_3798, float3(0.21267290413379669189453125f, 0.715152204036712646484375f, 0.072175003588199615478515625f)).xxx, _3798, _18_m76.w.xxx) * _18_m76.xyz;
     float2 _3818 = min(lerp(((sqrt(sqrt(abs(_673 * 0.5f))) * float2(int2(sign(_673)))) * 0.5f) + 0.5f.xx, ((sqrt(sqrt(abs(0.0f.xx))) * float2(int2(sign(0.0f.xx)))) * 0.5f) + 0.5f.xx, _660.xx), 1.0f.xx);
     float4 _3819 = float4(_3818.x, _3818.y, _370.z, _370.w);
     _3819.z = float(clamp(max(dot(_3808.xyz, float3(0.21267290413379669189453125f, 0.715152204036712646484375f, 0.072175003588199615478515625f)) * _547, _547) * 10.0f, 0.0f, 1.0f) > 0.5f);
     _3819.w = lerp(0.0f, 0.699999988079071044921875f, _660);
+    /*
+     Vanilla shader code from 0x70B436EE:
+    _13 = float4(_3808.x, _3808.y, _3808.z, _3408.w);
+    */
+    // RenoDX code start: compress bright transparent output while preserving hue and clear the auxiliary alpha.
     float3 renodx_output_color = float3(_3808.x, _3808.y, _3808.z);
     if (GLASS_TRANSPARENCY > 0.5f) {
         float renodx_luminance = dot(renodx_output_color, float3(0.212599993f, 0.715200007f, 0.0722000003f));
@@ -1509,6 +1531,7 @@ void frag_main()
     _13 = float4(renodx_output_color, _3408.w);
     _14 = _3819;
     if (GLASS_TRANSPARENCY > 0.5f) _14.w = 0.0f;
+    // RenoDX code end
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)

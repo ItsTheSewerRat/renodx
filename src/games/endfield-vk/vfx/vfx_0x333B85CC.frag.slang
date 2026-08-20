@@ -437,6 +437,11 @@ void frag_main()
         _619 = 0.0f.xx;
     }
     bool3 _621 = (_31_m1 == 2.0f).xxx;
+    /*
+    Vanilla shader code from 0x333B85CC:
+    float3 _624 = _574 * _567;
+    */
+    // RenoDX code: apply the user-controlled HDR VFX boost to the vanilla VFX color.
     float3 _624 = ApplyVFXBoost(_574 * _567);
     float3 _625 = (1.0f - _567).xxx + _624;
     float3 _626 = float3(_621.x ? _625.x : _624.x, _621.y ? _625.y : _624.y, _621.z ? _625.z : _624.z);

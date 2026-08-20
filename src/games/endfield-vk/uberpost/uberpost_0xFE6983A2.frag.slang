@@ -134,31 +134,20 @@ void main(
   r1.w = cb1[20].y * r0.y;
   r1.z = saturate(r1.z * cb1[20].x + r1.w);
   r0.xyz = cb1[7].www * r0.xyz;
-  /* Original Code
-  r0.xyz = r0.xyz * float3(5.55555582,5.55555582,5.55555582) + float3(0.0479959995,0.0479959995,0.0479959995);
-  r0.xyz = max(float3(0,0,0), r0.xyz);
-  r0.xyz = log2(r0.xyz);
-  r0.xyz = saturate(r0.xyz * float3(0.0734997839,0.0734997839,0.0734997839) + float3(0.386036009,0.386036009,0.386036009));
-  r3.xyz = cb1[7].zzz * r0.xyz;
-  r0.y = floor(r3.x);
-  r2.zw = cb1[7].xy * float2(0.5,0.5);
-  r3.yz = r3.yz * cb1[7].xy + r2.zw;
-  r3.x = r0.y * cb1[7].y + r3.y;
-  r4.xyz = t2.SampleLevel(s2_s, r3.xz, 0).xyz;
-  r5.x = cb1[7].y;
-  r5.y = 0;
-  r2.zw = r5.xy + r3.xz;
-  r3.xyz = t2.SampleLevel(s2_s, r2.zw, 0).xyz;
-  r0.x = r0.x * cb1[7].z + -r0.y;
-  r3.xyz = r3.xyz + -r4.xyz;
-  r0.xyz = r0.xxx * r3.xyz + r4.xyz;
-  r3.xyz = float3(12.9200001,12.9200001,12.9200001) * r0.xyz;
-  r4.xyz = log2(abs(r0.xyz));
-  r4.xyz = float3(0.416666657,0.416666657,0.416666657) * r4.xyz;
-  r4.xyz = exp2(r4.xyz);
-  r4.xyz = r4.xyz * float3(1.05499995,1.05499995,1.05499995) + float3(-0.0549999997,-0.0549999997,-0.0549999997);
-  r0.xyz = cmp(float3(0.00313080009,0.00313080009,0.00313080009) >= r0.xyz);
+  /*
+  Vanilla shader code from 0xFE6983A2:
+    float3 _321 = clamp(((log2(max(((_214.xyz * _18_m7.w).xyz * 5.555555820465087890625f) + 0.04799599945545196533203125f.xxx, 0.0f.xxx)) * 0.3010300099849700927734375f) * 0.24416099488735198974609375f) + 0.3860360085964202880859375f.xxx, 0.0f.xxx, 1.0f.xxx);
+    float _327 = _321.z * _18_m7.z;
+    float _328 = floor(_327);
+    float2 _334 = ((_321.xy * _18_m7.z) * _18_m7.xy) + (_18_m7.xy * 0.5f);
+    float3 _335 = float3(_334.x, _334.y, _321.z);
+    _335.x = _334.x + (_328 * _18_m7.y);
+    float3 _353 = lerp(_11.SampleLevel(_16, _335.xy, 0.0f).xyz, _11.SampleLevel(_16, _335.xy + float2(_18_m7.y, 0.0f), 0.0f).xyz, (_327 - _328).xxx).xyz;
+    float3 _354 = _353 * 12.9200000762939453125f;
+    float3 _358 = (pow(abs(_353), 0.4166666567325592041015625f.xxx) * 1.05499994754791259765625f) - 0.054999999701976776123046875f.xxx;
+    bool3 _359 = bool3(_353.x <= 0.003130800090730190277099609375f.xxx.x, _353.y <= 0.003130800090730190277099609375f.xxx.y, _353.z <= 0.003130800090730190277099609375f.xxx.z);
   */
+  // RenoDX code start: apply the selected SDR/HDR grade using the preserved linear scene color.
   LUTSampleResult lut_sample = LUTSAMPLE(s2_s, cb1[7].xyz, t2, r0.yzx);
   float3 graded_linear;
   [branch]
@@ -168,6 +157,7 @@ void main(
     graded_linear = HDRGRADE(lut_sample);
   }
   float3 graded_encoded = renodx::color::srgb::EncodeSafe(graded_linear);
+  // RenoDX code end
   r1.w = 1 + -r0.w;
   r1.w = -cb1[16].y + r1.w;
   r0.w = -cb1[16].y + r0.w;
@@ -192,6 +182,7 @@ void main(
   r1.xyz = cb1[21].xyz * r1.yyy + r1.xzw;
   r1.xyz = r1.xyz + -r0.xyz;
   o0.xyz = cb1[20].www * r1.xyz + r0.xyz;
+  // RenoDX code start: return the vanilla composite to linear, then apply optional grain and output encoding.
   o0.xyz = renodx::color::srgb::DecodeSafe(o0.xyz);
   if (CUSTOM_GRAIN_STRENGTH > 0) {
     o0.xyz = renodx::effects::ApplyFilmGrain(
@@ -201,5 +192,6 @@ void main(
         CUSTOM_GRAIN_STRENGTH * 0.03f);
   }
   o0.xyz = renodx::draw::RenderIntermediatePass(o0.xyz);
+  // RenoDX code end
   return;
 }

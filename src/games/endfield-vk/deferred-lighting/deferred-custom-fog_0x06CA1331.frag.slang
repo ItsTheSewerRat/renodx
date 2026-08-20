@@ -518,6 +518,11 @@ void frag_main()
     float3 _886;
     float3 _887;
     [branch]
+    /*
+    Vanilla shader code from 0x06CA1331:
+    if (_9_m23.x != 0.0f)
+    */
+    // RenoDX code: keep the GTAO sample path active when Improved GTAO is enabled.
     if ((_9_m23.x != 0.0f) || (RENODX_IMPROVED_GTAO != 0.0f))
     {
         float _862 = min(_22.SampleBias(_14, _4, _9_m16).x, _420);
@@ -529,6 +534,7 @@ void frag_main()
         _886 = _849;
         _887 = _849;
     }
+    // RenoDX code: apply the sampled GTAO term when Improved GTAO is enabled.
     _847.xyz *= (RENODX_IMPROVED_GTAO != 0.0f) ? _886 : 1.0f.xxx;
     float3 _2744;
     [branch]
@@ -1218,6 +1224,7 @@ void frag_main()
     float3 _3128 = _2783 * _3125;
     float3 _3130 = (clamp(_2746.xyz, 0.0f.xxx, 255.0f.xxx).xyz * _3128) + ((((clamp(((_9_m46.xyz * (0.0596831031143665313720703125f * (1.0f + (_2786 * _2786)))) + _9_m48.xyz) + (_9_m47.xyz * ((1.0f - _2792) / max((12.56637096405029296875f * _2796) * sqrt(_2796), 0.001000000047497451305389404296875f))), 0.0f.xxx, 1.0f.xxx) * 255.0f) * (1.0f.xxx - _2783)) * _3125) + _3124);
 
+    // RenoDX code start: apply the hue-preserving fog composite.
     if (RENODX_CUSTOM_FOG > 0.5f)
 
     {
@@ -1225,6 +1232,7 @@ void frag_main()
         _3130 = (_3130 * 0.65f) + (clamp(_2746.xyz, 0.0f.xxx, 255.0f.xxx).xyz * 0.35f);
 
     }
+    // RenoDX code end
     float4 _3132 = float4(_3130.x, _3130.y, _3130.z, _2746.w);
     _3132.w = dot(_3128, 0.3333333432674407958984375f.xxx);
     _5 = _3132;

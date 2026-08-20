@@ -93,40 +93,21 @@ void main(
   r0.xyz = -r0.xyz * float3(0.166666672,0.166666672,0.166666672) + r2.xyz;
   r0.xyz = cb1[9].xxx * r0.xyz + r1.xyz;
   r0.xyz = cb1[7].www * r0.xyz;
-  /* Original Code
-  r0.xyz = r0.xyz * float3(5.55555582,5.55555582,5.55555582) + float3(0.0479959995,0.0479959995,0.0479959995);
-  r0.xyz = max(float3(0,0,0), r0.xyz);
-  r0.xyz = log2(r0.xyz);
-  r0.xyz = saturate(r0.xyz * float3(0.0734997839,0.0734997839,0.0734997839) + float3(0.386036009,0.386036009,0.386036009));
-  r0.yzw = cb1[7].zzz * r0.xyz;
-  r0.y = floor(r0.y);
-  r1.xy = cb1[7].xy * float2(0.5,0.5);
-  r1.yz = r0.zw * cb1[7].xy + r1.xy;
-  r1.x = r0.y * cb1[7].y + r1.y;
-  r2.xyz = t2.SampleLevel(s0_s, r1.xz, 0).xyz;
-  r3.x = cb1[7].y;
-  r3.y = 0;
-  r0.zw = r3.xy + r1.xz;
-  r1.xyz = t2.SampleLevel(s0_s, r0.zw, 0).xyz;
-  r0.x = r0.x * cb1[7].z + -r0.y;
-  r0.yzw = r1.xyz + -r2.xyz;
-  r0.xyz = r0.xxx * r0.yzw + r2.xyz;
-  r1.xyz = float3(12.9200001,12.9200001,12.9200001) * r0.xyz;
-  r2.xyz = log2(abs(r0.xyz));
-  r2.xyz = float3(0.416666657,0.416666657,0.416666657) * r2.xyz;
-  r2.xyz = exp2(r2.xyz);
-  r2.xyz = r2.xyz * float3(1.05499995,1.05499995,1.05499995) + float3(-0.0549999997,-0.0549999997,-0.0549999997);
-  r0.xyz = cmp(float3(0.00313080009,0.00313080009,0.00313080009) >= r0.xyz);
-  r0.xyz = r0.xyz ? r1.xyz : r2.xyz;
-  r1.xy = cb0[0].xy * v1.xy;
-  r0.w = dot(float2(171,231), r1.xy);
-  r1.xyz = float3(0.00970873795,0.0140845068,0.010309278) * r0.www;
-  r1.xyz = frac(r1.xyz);
-  r1.xyz = float3(-0.5,-0.5,-0.5) + r1.xyz;
-  o0.xyz = r1.xyz * float3(0.0013725491,0.0013725491,0.0013725491) + r0.xyz;
-  o0.w = min(1, r1.w);
-  return;
+  /*
+  Vanilla shader code from 0x13C57353:
+    float3 _212 = clamp(((log2(max(((lerp(_154, (_154 - ((_154 * (max((_14_m10.w * _181) * _181, _177 - _14_m10.x) / max(_177, 9.9999997473787516355514526367188e-05f))) * _14_m9.z)) + (float3(_164.x ? _167.x : _159.x, _164.y ? _167.y : _159.y, _164.z ? _167.z : _159.z) * _14_m11.xyz), _14_m9.x.xxx) * _14_m7.w) * 5.555555820465087890625f) + 0.04799599945545196533203125f.xxx, 0.0f.xxx)) * 0.3010300099849700927734375f) * 0.24416099488735198974609375f) + 0.3860360085964202880859375f.xxx, 0.0f.xxx, 1.0f.xxx);
+    float _218 = _212.z * _14_m7.z;
+    float _219 = floor(_218);
+    float2 _225 = ((_212.xy * _14_m7.z) * _14_m7.xy) + (_14_m7.xy * 0.5f);
+    float3 _226 = float3(_225.x, _225.y, _212.z);
+    _226.x = _225.x + (_219 * _14_m7.y);
+    float3 _243 = lerp(_11.SampleLevel(_12, _226.xy, 0.0f).xyz, _11.SampleLevel(_12, _226.xy + float2(_14_m7.y, 0.0f), 0.0f).xyz, (_218 - _219).xxx);
+    float3 _244 = _243 * 12.9200000762939453125f;
+    float3 _248 = (pow(abs(_243), 0.4166666567325592041015625f.xxx) * 1.05499994754791259765625f) - 0.054999999701976776123046875f.xxx;
+    bool3 _249 = bool3(_243.x <= 0.003130800090730190277099609375f.xxx.x, _243.y <= 0.003130800090730190277099609375f.xxx.y, _243.z <= 0.003130800090730190277099609375f.xxx.z);
+    _4 = float4(float3(_249.x ? _244.x : _248.x, _249.y ? _244.y : _248.y, _249.z ? _244.z : _248.z) + (((frac(dot(float2(171.0f, 231.0f), _3 * _6_m0.xy).xxx * float3(0.00970873795449733734130859375f, 0.0140845067799091339111328125f, 0.010309278033673763275146484375f)) - 0.5f.xxx) * 0.0039215688593685626983642578125f.xxx) * 0.3499999940395355224609375f), min(_128.w, 1.0f));
   */
+  // RenoDX code start: apply the selected SDR/HDR grade using the preserved linear scene color.
   LUTSampleResult lut_sample = LUTSAMPLE(s0_s, cb1[7].xyz, t2, r0.yzx);
   [branch]
   if (shader_injection.tone_map_type == 0.f) {
@@ -142,6 +123,7 @@ void main(
         CUSTOM_GRAIN_STRENGTH * 0.03f);
   }
   o0.xyz = renodx::draw::RenderIntermediatePass(o0.xyz);
+  // RenoDX code end
   o0.w = min(1, r1.w);
   return;
 }

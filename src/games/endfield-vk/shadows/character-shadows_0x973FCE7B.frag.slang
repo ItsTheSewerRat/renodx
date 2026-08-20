@@ -340,6 +340,7 @@ void main(
       r0.w = r3.w * r2.w + r0.w;
       r0.w = -1 + r0.w;
       r0.w = cb1[95].z * r0.w + 1;
+      // RenoDX code: scale the game's cloud-shadow contribution with the fake-cloud-shadow control.
       r0.z *= lerp(1.0, r0.w, saturate(FAKE_CLOUD_SHADOWS));
     }
     r0.w = cb3[35].z + -r0.z;
@@ -431,10 +432,12 @@ void main(
   o0.y = r1.w ? r0.y : r0.x;
   r0.x = min(1, r0.z);
 
+  // RenoDX code start: apply user-controlled smoothstep hardening to the vanilla shadow result.
   r0.x = lerp(
       r0.x,
       r0.x * r0.x * (3.0 - 2.0 * r0.x),
       saturate(SHADOW_HARDENING));
+  // RenoDX code end
 
   r0.x = -1 + r0.x;
   o0.x = cb3[34].x * r0.x + 1;

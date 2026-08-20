@@ -123,10 +123,12 @@ void comp_main()
                 float4 _275 = mul(_6_m5, float4((_227 + ((lerp(_230 * dot(_230, _216), _216, _220) + (cross(_230, _216) * _223)) * _211)) - _6_m11.xyz, 1.0f));
                 float2 _296 = 0.0f.xx;
                 _296.y = clamp(log2(sqrt(pow(distance(_255, (((_261.xy / _261.w.xx).xy * 0.5f) + 0.5f.xx) * _13_m0.xy), 2.0f) + pow(distance(_255, (((_275.xy / _275.w.xx).xy * 0.5f) + 0.5f.xx) * _13_m0.xy), 2.0f)) * 0.5f), 0.0f, _13_m5.y) / _13_m5.y;
+                // RenoDX code start: favor sharper initialization data when Improved SSR is enabled.
                 if (shader_injection.improved_ssr >= 0.5f)
                 {
                     _296.y = saturate((_296.y - 0.25f) / 0.75f);
                 }
+                // RenoDX code end
                 _297 = _296;
             }
             else

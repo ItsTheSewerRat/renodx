@@ -162,10 +162,12 @@ SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
     _6 = stage_input._6;
     _7 = stage_input._7;
     frag_main();
+    // RenoDX code start: hide this UI pass when the UI visibility control is disabled.
     if (UI_VISIBILITY < 0.5f)
     {
         _8 = 0.0f;
     }
+    // RenoDX code end
     SPIRV_Cross_Output stage_output;
     stage_output._8 = _8;
     return stage_output;
