@@ -519,11 +519,16 @@ bool ui_toggle_key_was_pressed = false;
 int ui_toggle_hotkey = 0;
 bool hotkey_input_active = false;
 
-bool is_ping_input_candidate = false;
-bool is_ping_drawn = false;
-bool is_uid_input_candidate = false;
-bool is_latency_bar_draw_candidate = false;
-uint32_t draw_call_vertex_count = 0;
+struct UiDrawDetectionState {
+  bool is_ping_input_candidate = false;
+  bool is_ping_drawn = false;
+  bool is_uid_input_candidate = false;
+  bool is_latency_bar_draw_candidate = false;
+  uint32_t draw_call_vertex_count = 0;
+};
+
+std::mutex ui_draw_detection_mutex;
+std::unordered_map<uint64_t, UiDrawDetectionState> ui_draw_detection_states;
 
 struct VfxBoostMatch {
   uint32_t shader_crc;
@@ -587,6 +592,11 @@ void ClearVfxCommandListDescriptors(reshade::api::command_list* cmd_list) {
   const std::lock_guard lock(vulkan_descriptor_mutex);
   vulkan_graphics_descriptor_set_1.erase(command_buffer);
   vulkan_graphics_push_images_set_1.erase(command_buffer);
+}
+
+void ClearUiDrawDetectionState(reshade::api::command_list* cmd_list) {
+  const std::lock_guard lock(ui_draw_detection_mutex);
+  ui_draw_detection_states.erase(GetCommandListKey(cmd_list));
 }
 
 bool IsVfxTextureDesc(const reshade::api::resource_desc& desc) {
@@ -1113,23 +1123,38 @@ bool DrawTextRegion(
 }
 
 bool OnPingDraw(reshade::api::command_list* cmd_list) {
-  if (is_ping_input_candidate) {
-    is_ping_drawn = true;
+  const std::lock_guard lock(ui_draw_detection_mutex);
+  auto& state = ui_draw_detection_states[GetCommandListKey(cmd_list)];
+  if (state.is_ping_input_candidate) {
+    state.is_ping_drawn = true;
   } else {
-    is_ping_drawn = false;
+    state.is_ping_drawn = false;
   }
   return true;
 }
 
 bool InjectLatencyBarDrawOpacity(reshade::api::command_list* cmd_list) {
-  shader_injection.latency_bar_draw_opacity =
-      is_latency_bar_draw_candidate
+  bool is_latency_bar_draw_candidate = false;
+  {
+    const std::lock_guard lock(ui_draw_detection_mutex);
+    const auto state = ui_draw_detection_states.find(GetCommandListKey(cmd_list));
+    is_latency_bar_draw_candidate = state != ui_draw_detection_states.end()
+        && state->second.is_latency_bar_draw_candidate;
+  }
+  shader_injection.latency_bar_draw_opacity = is_latency_bar_draw_candidate
       ? shader_injection.ping_text_opacity
       : 1.f;
   return true;
 }
 
 bool OnUIDDraw(reshade::api::command_list* cmd_list) {
+  bool is_uid_input_candidate = false;
+  {
+    const std::lock_guard lock(ui_draw_detection_mutex);
+    const auto state = ui_draw_detection_states.find(GetCommandListKey(cmd_list));
+    is_uid_input_candidate = state != ui_draw_detection_states.end()
+        && state->second.is_uid_input_candidate;
+  }
   if (is_uid_input_candidate) {
     if (!IsVisible(shader_injection.status_text_opacity) &&
         !IsVisible(shader_injection.latency_text_opacity)) {
@@ -2081,8 +2106,12 @@ bool OnDraw(
     uint32_t instance_count,
     uint32_t first_vertex,
     uint32_t first_instance) {
-  draw_call_vertex_count = vertex_count;
-  is_latency_bar_draw_candidate = false;
+  {
+    const std::lock_guard lock(ui_draw_detection_mutex);
+    auto& state = ui_draw_detection_states[GetCommandListKey(cmd_list)];
+    state.draw_call_vertex_count = vertex_count;
+    state.is_latency_bar_draw_candidate = false;
+  }
   shader_injection.latency_bar_draw_opacity = 1.f;
   return false;
 }
@@ -2094,7 +2123,11 @@ bool OnDrawIndexed(
     uint32_t first_index,
     int32_t vertex_offset,
     uint32_t first_instance) {
-  is_latency_bar_draw_candidate = false;
+  const uint64_t command_list_key = GetCommandListKey(cmd_list);
+  {
+    const std::lock_guard lock(ui_draw_detection_mutex);
+    ui_draw_detection_states[command_list_key].is_latency_bar_draw_candidate = false;
+  }
   shader_injection.latency_bar_draw_opacity = 1.f;
 
   constexpr uint32_t PING_INDEX_COUNT = 18;
@@ -2116,9 +2149,11 @@ bool OnDrawIndexed(
   if (!ui_hidden
       && !ping_geometry_candidate
       && !uid_geometry_candidate) {
-    is_ping_input_candidate = false;
-    is_uid_input_candidate = false;
-    draw_call_vertex_count = 0;
+    const std::lock_guard lock(ui_draw_detection_mutex);
+    auto& state = ui_draw_detection_states[command_list_key];
+    state.is_ping_input_candidate = false;
+    state.is_uid_input_candidate = false;
+    state.draw_call_vertex_count = 0;
     return false;
   }
 
@@ -2134,27 +2169,38 @@ bool OnDrawIndexed(
   if (ui_hidden
       && std::ranges::find(kVulkanDirectHidePixelShaderHashes, pixel_shader_hash)
           != kVulkanDirectHidePixelShaderHashes.end()) {
-    draw_call_vertex_count = 0;
+    const std::lock_guard lock(ui_draw_detection_mutex);
+    ui_draw_detection_states[command_list_key].draw_call_vertex_count = 0;
     return true;
   }
 
-  is_latency_bar_draw_candidate = ping_geometry_candidate
-                                  && vertex_shader_hash == kVulkanPingVertexShaderHash
-                                  && pixel_shader_hash == kVulkanPingPixelShaderHash;
-  is_ping_input_candidate = is_latency_bar_draw_candidate && (draw_call_vertex_count == 0);
-
+  const bool is_latency_bar_draw_candidate =
+      ping_geometry_candidate
+      && vertex_shader_hash == kVulkanPingVertexShaderHash
+      && pixel_shader_hash == kVulkanPingPixelShaderHash;
   if (is_latency_bar_draw_candidate) {
-    if (is_ping_input_candidate) {
-      is_ping_drawn = true;
+    {
+      const std::lock_guard lock(ui_draw_detection_mutex);
+      auto& state = ui_draw_detection_states[command_list_key];
+      state.is_latency_bar_draw_candidate = true;
+      state.is_ping_input_candidate = state.draw_call_vertex_count == 0;
+      if (state.is_ping_input_candidate) {
+        state.is_ping_drawn = true;
+      }
+      state.draw_call_vertex_count = 0;
     }
-    draw_call_vertex_count = 0;
-    return false;
+    return !IsVisible(shader_injection.ping_text_opacity);
   }
 
-  is_uid_input_candidate = uid_geometry_candidate
-                           && (is_ping_drawn || pixel_shader_hash == kVulkanUidPixelShaderHash);
-
-  draw_call_vertex_count = 0;
+  bool is_uid_input_candidate = false;
+  {
+    const std::lock_guard lock(ui_draw_detection_mutex);
+    auto& state = ui_draw_detection_states[command_list_key];
+    state.is_uid_input_candidate = uid_geometry_candidate
+        && (state.is_ping_drawn || pixel_shader_hash == kVulkanUidPixelShaderHash);
+    state.draw_call_vertex_count = 0;
+    is_uid_input_candidate = state.is_uid_input_candidate;
+  }
 
   if (!is_uid_input_candidate) {
     return false;
@@ -2247,11 +2293,6 @@ void OnPresent(reshade::api::command_queue* queue,
     shader_injection.ui_aspect_ratio = static_cast<float>(bb.texture.height) / static_cast<float>(bb.texture.width);
   }
 
-  is_ping_input_candidate = false;
-  is_uid_input_candidate = false;
-  is_ping_drawn = false;
-  is_latency_bar_draw_candidate = false;
-  draw_call_vertex_count = 0;
   shader_injection.latency_bar_draw_opacity = 1.f;
 
   float current_tech_test = shader_injection.tech_test_look;
@@ -2533,6 +2574,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
             ClearVfxCommandListDescriptors);
         reshade::register_event<reshade::addon_event::destroy_command_list>(
             ClearVfxCommandListDescriptors);
+        reshade::register_event<reshade::addon_event::reset_command_list>(
+            ClearUiDrawDetectionState);
+        reshade::register_event<reshade::addon_event::destroy_command_list>(
+            ClearUiDrawDetectionState);
         reshade::register_event<reshade::addon_event::destroy_device>(OnDestroyVfxDevice);
         reshade::register_event<reshade::addon_event::destroy_resource>(OnDestroyVfxResource);
         reshade::register_event<reshade::addon_event::destroy_resource_view>(OnDestroyVfxResourceView);
@@ -2577,6 +2622,10 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lpv_reserved) {
           ClearVfxCommandListDescriptors);
       reshade::unregister_event<reshade::addon_event::destroy_command_list>(
           ClearVfxCommandListDescriptors);
+      reshade::unregister_event<reshade::addon_event::reset_command_list>(
+          ClearUiDrawDetectionState);
+      reshade::unregister_event<reshade::addon_event::destroy_command_list>(
+          ClearUiDrawDetectionState);
       reshade::unregister_event<reshade::addon_event::destroy_device>(OnDestroyVfxDevice);
       reshade::unregister_event<reshade::addon_event::destroy_resource>(OnDestroyVfxResource);
       reshade::unregister_event<reshade::addon_event::destroy_resource_view>(OnDestroyVfxResourceView);
