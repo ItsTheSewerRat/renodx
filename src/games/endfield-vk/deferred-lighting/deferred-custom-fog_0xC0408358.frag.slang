@@ -1254,6 +1254,7 @@ void frag_main()
         }
         float3 _3152 = (_2770.xyz * (_2810 * _3147)) + ((((clamp(((_19_m46.xyz * (0.0596831031143665313720703125f * (1.0f + (_2813 * _2813)))) + _19_m48.xyz) + (_19_m47.xyz * ((1.0f - _2819) / max((12.56637096405029296875f * _2823) * sqrt(_2823), 0.001000000047497451305389404296875f))), 0.0f.xxx, 1.0f.xxx) * 255.0f) * (1.0f.xxx - _2810)) * _3147) + _3146);
 
+        // RenoDX code start: apply the hue-preserving fog composite.
         if (RENODX_CUSTOM_FOG > 0.5f)
 
         {
@@ -1261,6 +1262,7 @@ void frag_main()
             _3152 = (_3152 * 0.65f) + (_2770.xyz * 0.35f);
 
         }
+        // RenoDX code end
         _3154 = float4(_3152.x, _3152.y, _3152.z, _2770.w);
     }
     else

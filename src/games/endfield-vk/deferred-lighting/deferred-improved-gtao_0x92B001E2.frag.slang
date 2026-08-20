@@ -563,6 +563,11 @@ void frag_main()
     float3 _1274;
     float3 _1275;
     [branch]
+    /*
+    Vanilla shader code from 0x92B001E2:
+    if (_9_m23.x != 0.0f)
+    */
+    // RenoDX code: keep the GTAO sample path active when Improved GTAO is enabled.
     if ((_9_m23.x != 0.0f) || (RENODX_IMPROVED_GTAO != 0.0f))
     {
         float _1250 = min(_21.SampleBias(_12, _4, _9_m16).x, _374);
@@ -574,6 +579,7 @@ void frag_main()
         _1274 = _1235;
         _1275 = _1235;
     }
+    // RenoDX code: apply the sampled GTAO term when Improved GTAO is enabled.
     _1233.xyz *= (RENODX_IMPROVED_GTAO != 0.0f) ? _1274 : 1.0f.xxx;
     float3 _1292 = (_427 + (_397 * 0.25f)) + (((frac(52.98291778564453125f * frac(dot(_402 + (float2(2.0829999446868896484375f, 4.867000102996826171875f) * float(int(_9_m107.x))), float2(0.067110560834407806396484375f, 0.005837149918079376220703125f)))) * 2.0f) - 1.0f) * 0.20000000298023223876953125f).xxx;
     float3 _1302 = mul(float3x3(_7_m1[0].xyz, _7_m1[1].xyz, _7_m1[2].xyz), float3(0.0f, 0.0f, 1.0f));
@@ -870,10 +876,12 @@ void frag_main()
         _2148 = _1924;
     }
     float3 _2154 = (_2148 * _9_m23.z) * _9_m22.y;
+    // RenoDX code start: link cubemap ambient intensity to the scene lighting response.
     if (RENODX_CUBEMAP_AMBIENT != 0.0f)
     {
         _2154 *= 0.25f + (0.75f * saturate(_1922));
     }
+    // RenoDX code end
     float3 _2177;
     [branch]
     if (_9_m23.y != 0.0f)
@@ -938,10 +946,12 @@ void frag_main()
     }
     float3 _2560 = _2219 * _2557;
     float3 _2562 = (_2185 * _2560) + ((((clamp(((_9_m46.xyz * (0.0596831031143665313720703125f * (1.0f + (_2222 * _2222)))) + _9_m48.xyz) + (_9_m47.xyz * ((1.0f - _2228) / max((12.56637096405029296875f * _2232) * sqrt(_2232), 0.001000000047497451305389404296875f))), 0.0f.xxx, 1.0f.xxx) * 255.0f) * (1.0f.xxx - _2219)) * _2557) + _2556);
+    // RenoDX code start: apply the hue-preserving fog composite.
     if (RENODX_CUSTOM_FOG > 0.5f)
     {
         _2562 = (_2562 * 0.65f) + (_2185 * 0.35f);
     }
+    // RenoDX code end
     float _2563 = dot(_2560, 0.3333333432674407958984375f.xxx);
     float4 _2564 = float4(_2562.x, _2562.y, _2562.z, _2182.w);
     _2564.w = _2563;

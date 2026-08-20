@@ -63,6 +63,11 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
     r1.w = r2.w / r1.w;
     r2.xyz = r2.xyz * r1.www;
 
+    /*
+    Vanilla shader code from 0x3DAE293E:
+    float3 _143 = (_118.xyz * (max((_13_m1.w * _132) * _132, _128 - _13_m1.x) / max(_128, 9.9999997473787516355514526367188e-05f))) * _5_m20.x;
+    */
+    // RenoDX code: scale the vanilla prefiltered bloom contribution with the bloom control.
     r2.xyz = cb0[27].xxx * r2.xyz * (BLOOM_STRENGTH / 50.0f);
 
     r1.w = dot(r2.xyz, float3(0.212672904,0.715152204,0.0721750036));

@@ -247,6 +247,7 @@ void main(
   r0.xyz = r1.xyz * r0.xxx;
 
   // ACES approximation (color * (a*color + b)) / (color * (c*color + d) + e)
+  // RenoDX code: retain the game tonemapper for type 0 and select the improved branch otherwise.
   if (RENODX_TONE_MAP_TYPE == 0.f) {
     r1.xyz = r0.xyz * float3(2.93604493, 2.93604493, 2.93604493) + float3(0.887121975, 0.887121975, 0.887121975);
     r1.xyz = r0.xyz * r1.xyz + float3(0.806888998, 0.806888998, 0.806888998);
@@ -257,6 +258,7 @@ void main(
     r0.yzw = r2.xyz * r1.xyz;
     r0.yzw = min(float3(1, 1, 1), r0.yzw);
   } else {
+    // RenoDX code start: replace per-channel clipping with hue-preserving luminance tonemapping.
     float3 untonemapped = r0.rgb;
     float3 per_channel_tonemapped = float3(
         ACESLikeScalar(untonemapped.x),
@@ -274,6 +276,7 @@ void main(
         luminance_tonemapped_color,
         untonemapped,
         per_channel_tonemapped);
+    // RenoDX code end
   }
 
   r0.x = dot(r0.xyz, float3(0.272228986, 0.674081981, 0.0536894985));
@@ -286,12 +289,14 @@ void main(
   r1.x = dot(float3(1.70505154, -0.621790707, -0.083258681), r0.yzw);
   r1.y = dot(float3(-0.130257145, 1.14080286, -0.0105481902), r0.yzw);
   r1.z = dot(float3(-0.0240032692, -0.128968775, 1.15297163), r0.yzw);
+  // RenoDX code: preserve the game's gamut clamp only for the vanilla tonemapper.
   if (RENODX_TONE_MAP_TYPE == 0.f) {
     r0.y = max(r1.x, r1.y);
     r0.y = max(r0.y, r1.z);
     r0.y = max(9.99999975e-006, r0.y);
     r0.yzw = saturate(r1.xyz / r0.yyy);
   } else {
+    // RenoDX code: preserve the improved branch's unclipped color for HDR grading.
     r0.yzw = r1.xyz;
   }
   r0.yzw = r0.yzw + -r1.xyz;

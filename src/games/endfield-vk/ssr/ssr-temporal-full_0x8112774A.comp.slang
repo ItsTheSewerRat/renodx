@@ -75,16 +75,20 @@ void main(uint3 vThreadGroupID : SV_GroupID, uint3 vThreadIDInGroup : SV_GroupTh
       bool use_full_trace = t4.SampleLevel(s0_s, r2.zw, 0).x > 0.5;
       float low_trace_count = max(ceil(cb2[3].x * 0.125), 4.0f);
       r1.w = use_full_trace ? cb2[3].x : low_trace_count;
+      // RenoDX code start: raise the full- and low-quality ray floors when Improved SSR is enabled.
       if (shader_injection.improved_ssr >= 0.5f) {
         r1.w = max(r1.w, use_full_trace ? 256.0f : 32.0f);
       }
+      // RenoDX code end
 #else
       r1.w = cb2[3].x * 0.125;
       r1.w = ceil(r1.w);
       r1.w = max(r1.w, 4.0f);
+      // RenoDX code start: raise the low-quality ray floor when Improved SSR is enabled.
       if (shader_injection.improved_ssr >= 0.5f) {
         r1.w = max(r1.w, 32.0f);
       }
+      // RenoDX code end
 #endif
       r3.z = t2.SampleLevel(s0_s, r2.xy, 0).x;
       r3.xy = r2.xy * float2(2,2) + float2(-1,-1);
@@ -386,10 +390,12 @@ void main(uint3 vThreadGroupID : SV_GroupID, uint3 vThreadIDInGroup : SV_GroupTh
     } else {
       r4.xy = float2(0,0);
     }
+    // RenoDX code start: favor sharper temporal data when Improved SSR is enabled.
     if (shader_injection.improved_ssr >= 0.5f) {
       float mip_threshold = 0.25f;
       r4.y = saturate((r4.y - mip_threshold) / (1.0f - mip_threshold));
     }
+    // RenoDX code end
     u0[(uint2)r0.xy] = r2.xy;
     u1[(uint2)r0.xy] = r4.xy;
     u2[(uint2)r0.xy] = r1.x;

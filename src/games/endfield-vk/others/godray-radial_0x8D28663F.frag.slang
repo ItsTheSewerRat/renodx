@@ -14,6 +14,7 @@ void main(
   float radial = saturate((length(centered_uv) - 1.f) / (cb0[3].y - 1.f));
   float4 color = cb0[6] * pow(radial, cb0[3].z);
 
+  // RenoDX code start: scale or disable the retained radial god-ray result with the user setting.
   if (GODRAYS_INTENSITY == 0.f) {
     color = 0.f;
   } else if (GODRAYS_INTENSITY == 2.f) {
@@ -21,6 +22,7 @@ void main(
   } else if (GODRAYS_INTENSITY == 3.f) {
     color *= 3.f;
   }
+  // RenoDX code end
 
   output = opacity * color;
 }

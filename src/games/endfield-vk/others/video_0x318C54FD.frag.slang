@@ -40,6 +40,11 @@ struct SPIRV_Cross_Output
 void frag_main()
 {
     float3 _70 = mul(float3x3(float3(1.16437995433807373046875f, 0.0f, 1.5960299968719482421875f), float3(1.16437995433807373046875f, -0.39175999164581298828125f, -0.812969982624053955078125f), float3(1.16437995433807373046875f, 2.01723003387451171875f, 0.0f)), float3(_11.Sample(_12, _2).w, _13.Sample(_14, _3).w, _15.Sample(_16, _3).w) + float3(-0.06274999678134918212890625f, -0.501959979534149169921875f, -0.501959979534149169921875f));
+    /*
+    Vanilla shader code from 0x318C54FD:
+    float4 _71 = float4(_70.x, _70.y, _70.z, _49.w);
+    */
+    // RenoDX code: Clear the sampled video alpha before applying the shader's calculated opacity.
     float4 _71 = float4(_70.x, _70.y, _70.z, 0.0f);
     _71.w = _4.w * (1.0f - _9_m7);
     _5 = _71;
@@ -51,6 +56,7 @@ SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
     _3 = stage_input._3;
     _4 = stage_input._4;
     frag_main();
+    // RenoDX code: Expand SDR video luminance into the configured HDR output range.
     _5.xyz = AutoHDRVideo(_5.xyz);
     SPIRV_Cross_Output stage_output;
     stage_output._5 = _5;

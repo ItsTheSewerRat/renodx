@@ -50,16 +50,21 @@ void main(
   r0.xy = r0.xy * r0.zz;
   r1.xyzw = t0.SampleLevel(s1_s, v1.xy, 0).xyzw;
   r1.xyz = float3(1,0,0) * r1.xyz;
+  // RenoDX code start: scale the game's chromatic-aberration offsets with the user setting.
   float ca_strength = CHROMATIC_ABERRATION_STRENGTH;
   float ca_base_offset = cb1[0].z * ca_strength;
+  // RenoDX code end
   r0.z = cmp(3 < cb1[25].x);
   if (r0.z != 0) {
     r2.xy = cmp(float2(0,0) != cb1[25].wz);
     r0.z = (int)r2.y | (int)r2.x;
     r2.xy = r0.xy * r0.ww;
     r2.xy = r0.zz ? r2.xy : r0.xy;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength + ca_base_offset;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r2.z = cb1[25].y * ca_strength + cb1[25].y * ca_strength;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r3.xyzw = cb1[25].yyyy * ca_strength * float4(3,3,4,4);
     r4.xy = -r2.xy * r0.zz + v1.xy;
     r4.xyz = t0.SampleLevel(s1_s, r4.xy, 0).xyz;
@@ -68,13 +73,16 @@ void main(
     r5.xy = -r2.xy * r0.zz + v1.xy;
     r5.xyz = t0.SampleLevel(s1_s, r5.xy, 0).xyz;
     r4.xyz = r5.xyz * float3(1,0,0) + r4.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r5.xy = -r2.xy * cb1[25].yy * ca_strength + v1.xy;
     r5.xyz = t0.SampleLevel(s1_s, r5.xy, 0).xyz;
     r4.xyz = r5.xyz * float3(0,1,0) + r4.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength * 2 + ca_base_offset;
     r5.xy = -r2.xy * r0.zz + v1.xy;
     r5.xyz = t0.SampleLevel(s1_s, r5.xy, 0).xyz;
     r4.xyz = r5.xyz * float3(0,1,0) + r4.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r3.xyzw = ca_base_offset.xxxx * float4(2,2,2,2) + r3.xyzw;
     r3.xyzw = -r2.xyxy * r3.xyzw + v1.xyxy;
     r5.xyz = t0.SampleLevel(s1_s, r3.xy, 0).xyz;
@@ -82,6 +90,7 @@ void main(
     r2.zw = -r2.xy * r2.zz + v1.xy;
     r5.xyz = t0.SampleLevel(s1_s, r2.zw, 0).xyz;
     r4.xyz = r5.xyz * float3(0,0,1) + r4.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength * 3 + ca_base_offset;
     r2.xy = -r2.xy * r0.zz + v1.xy;
     r2.xyz = t0.SampleLevel(s1_s, r2.xy, 0).xyz;
@@ -93,11 +102,14 @@ void main(
     r0.z = cmp(0.000000 != cb1[25].w);
     r3.xy = r0.xy * r0.ww;
     r0.xy = r0.zz ? r3.xy : r0.xy;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength * 2 + ca_base_offset;
     r0.zw = -r0.xy * r0.zz + v1.xy;
     r3.xyz = t0.SampleLevel(s1_s, r0.zw, 0).xyz;
     r1.xyz = r3.xyz * float3(0,1,0) + r1.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = ca_base_offset + ca_base_offset;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength * 3 + r0.z;
     r0.xy = -r0.xy * r0.zz + v1.xy;
     r0.xyz = t0.SampleLevel(s1_s, r0.xy, 0).xyz;
@@ -201,40 +213,22 @@ void main(
   r1.xyz = r0.www * r1.xyz + float3(1,1,1);
   r0.xyz = r1.xyz * r0.xyz;
   r0.xyz = cb1[7].www * r0.xyz;
-  /* Original Code
-  r0.xyz = r0.xyz * float3(5.55555582,5.55555582,5.55555582) + float3(0.0479959995,0.0479959995,0.0479959995);
-  r0.xyz = max(float3(0,0,0), r0.xyz);
-  r0.xyz = log2(r0.xyz);
-  r0.xyz = saturate(r0.xyz * float3(0.0734997839,0.0734997839,0.0734997839) + float3(0.386036009,0.386036009,0.386036009));
-  r0.yzw = cb1[7].zzz * r0.xyz;
-  r0.y = floor(r0.y);
-  r1.xy = cb1[7].xy * float2(0.5,0.5);
-  r1.yz = r0.zw * cb1[7].xy + r1.xy;
-  r1.x = r0.y * cb1[7].y + r1.y;
-  r2.xyz = t2.SampleLevel(s1_s, r1.xz, 0).xyz;
-  r3.x = cb1[7].y;
-  r3.y = 0;
-  r0.zw = r3.xy + r1.xz;
-  r1.xyz = t2.SampleLevel(s1_s, r0.zw, 0).xyz;
-  r0.x = r0.x * cb1[7].z + -r0.y;
-  r0.yzw = r1.xyz + -r2.xyz;
-  r0.xyz = r0.xxx * r0.yzw + r2.xyz;
-  r1.xyz = float3(12.9200001,12.9200001,12.9200001) * r0.xyz;
-  r2.xyz = log2(abs(r0.xyz));
-  r2.xyz = float3(0.416666657,0.416666657,0.416666657) * r2.xyz;
-  r2.xyz = exp2(r2.xyz);
-  r2.xyz = r2.xyz * float3(1.05499995,1.05499995,1.05499995) + float3(-0.0549999997,-0.0549999997,-0.0549999997);
-  r0.xyz = cmp(float3(0.00313080009,0.00313080009,0.00313080009) >= r0.xyz);
-  r0.xyz = r0.xyz ? r1.xyz : r2.xyz;
-  r1.xy = cb0[0].xy * v1.xy;
-  r0.w = dot(float2(171,231), r1.xy);
-  r1.xyz = float3(0.00970873795,0.0140845068,0.010309278) * r0.www;
-  r1.xyz = frac(r1.xyz);
-  r1.xyz = float3(-0.5,-0.5,-0.5) + r1.xyz;
-  o0.xyz = r1.xyz * float3(0.0013725491,0.0013725491,0.0013725491) + r0.xyz;
-  o0.w = min(1, r1.w);
-  return;
+  /*
+  Vanilla shader code from 0x10BC9694:
+    float3 _510 = clamp(((log2(max((((lerp(_431, (_431 - ((_431 * (max((_16_m10.w * _458) * _458, _454 - _16_m10.x) / max(_454, 9.9999997473787516355514526367188e-05f))) * _16_m9.z)) + (float3(_441.x ? _444.x : _436.x, _441.y ? _444.y : _436.y, _441.z ? _444.z : _436.z) * _16_m11.xyz), _16_m9.x.xxx) * lerp(1.0f.xxx, _481.xyz, lerp(_16_m3.x, clamp((_16_m3.x * 3.0f) - 2.0f, 0.0f, 1.0f), step(0.0f, min(min(_481.x, _481.y), _481.z) - 0.20000000298023223876953125f)).xxx)) * _16_m7.w) * 5.555555820465087890625f) + 0.04799599945545196533203125f.xxx, 0.0f.xxx)) * 0.3010300099849700927734375f) * 0.24416099488735198974609375f) + 0.3860360085964202880859375f.xxx, 0.0f.xxx, 1.0f.xxx);
+    float _516 = _510.z * _16_m7.z;
+    float _517 = floor(_516);
+    float2 _523 = ((_510.xy * _16_m7.z) * _16_m7.xy) + (_16_m7.xy * 0.5f);
+    float3 _524 = float3(_523.x, _523.y, _510.z);
+    _524.x = _523.x + (_517 * _16_m7.y);
+    float3 _541 = lerp(_11.SampleLevel(_14, _524.xy, 0.0f).xyz, _11.SampleLevel(_14, _524.xy + float2(_16_m7.y, 0.0f), 0.0f).xyz, (_516 - _517).xxx);
+    float3 _542 = _541 * 12.9200000762939453125f;
+    float3 _546 = (pow(abs(_541), 0.4166666567325592041015625f.xxx) * 1.05499994754791259765625f) - 0.054999999701976776123046875f.xxx;
+    bool3 _547 = bool3(_541.x <= 0.003130800090730190277099609375f.xxx.x, _541.y <= 0.003130800090730190277099609375f.xxx.y, _541.z <= 0.003130800090730190277099609375f.xxx.z);
+    float3 _559 = float3(_547.x ? _542.x : _546.x, _547.y ? _542.y : _546.y, _547.z ? _542.z : _546.z) + (((frac(dot(float2(171.0f, 231.0f), _3 * _6_m0.xy).xxx * float3(0.00970873795449733734130859375f, 0.0140845067799091339111328125f, 0.010309278033673763275146484375f)) - 0.5f.xxx) * 0.0039215688593685626983642578125f.xxx) * 0.3499999940395355224609375f);
+    _4 = float4(_559, min(_130.w, 1.0f));
   */
+  // RenoDX code start: apply the selected SDR/HDR grade using the preserved linear scene color.
   LUTSampleResult lut_sample = LUTSAMPLE(s1_s, cb1[7].xyz, t2, r0.yzx);
   [branch]
   if (shader_injection.tone_map_type == 0.f) {
@@ -250,6 +244,7 @@ void main(
         CUSTOM_GRAIN_STRENGTH * 0.03f);
   }
   o0.xyz = renodx::draw::RenderIntermediatePass(o0.xyz);
+  // RenoDX code end
   o0.w = min(1, r1.w);
   return;
 }

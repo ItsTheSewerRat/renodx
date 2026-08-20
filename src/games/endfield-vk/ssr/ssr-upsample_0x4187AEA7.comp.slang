@@ -43,12 +43,12 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r0.z = 1 / r0.z;
   r1.xyzw = r1.xyzx * r0.zzzz;
 
-  // Read mip from filter weight texture
   r0.z = t0.SampleLevel(s0_s, r0.xy, 0).y;
   r0.z = cb1[5].y * r0.z;
 
+  // RenoDX code: select fractional mip blending when Improved SSR is enabled.
   if (shader_injection.improved_ssr >= 0.5f) {
-    // Improved mode: fractional mip blending (ported from Miru's Vulkan mod)
+    // RenoDX code start: blend sharp and blurred SSR using the fractional mip.
     if (r0.z < 0.25) {
       // Low mip — use sharp temporal color directly
       r0.xyzw = r1.xyzw;
@@ -66,8 +66,8 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
         r0.xyzw = color_blurred;
       }
     }
+    // RenoDX code end
   } else {
-    // Vanilla mode: hard cutoff at mip 0.25
     r0.xyw = t2.SampleLevel(s1_s, r0.xy, 0).xyz;
     r0.z = cmp(r0.z < 0.25);
     r0.xyzw = r0.zzzz ? r1.xyzw : r0.xywx;

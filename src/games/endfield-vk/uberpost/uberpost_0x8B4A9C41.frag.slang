@@ -50,16 +50,21 @@ void main(
   r0.xy = r0.xy * r0.zz;
   r1.xyzw = t0.SampleLevel(s1_s, v1.xy, 0).xyzw;
   r1.xyz = float3(1,0,0) * r1.xyz;
+  // RenoDX code start: scale the game's chromatic-aberration offsets with the user setting.
   float ca_strength = CHROMATIC_ABERRATION_STRENGTH;
   float ca_base_offset = cb1[0].z * ca_strength;
+  // RenoDX code end
   r0.z = cmp(3 < cb1[25].x);
   if (r0.z != 0) {
     r2.xy = cmp(float2(0,0) != cb1[25].wz);
     r0.z = (int)r2.y | (int)r2.x;
     r2.xy = r0.xy * r0.ww;
     r2.xy = r0.zz ? r2.xy : r0.xy;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength + ca_base_offset;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r2.z = cb1[25].y * ca_strength + cb1[25].y * ca_strength;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r3.xyzw = cb1[25].yyyy * ca_strength * float4(3,3,4,4);
     r4.xy = -r2.xy * r0.zz + v1.xy;
     r4.xyz = t0.SampleLevel(s1_s, r4.xy, 0).xyz;
@@ -68,13 +73,16 @@ void main(
     r5.xy = -r2.xy * r0.zz + v1.xy;
     r5.xyz = t0.SampleLevel(s1_s, r5.xy, 0).xyz;
     r4.xyz = r5.xyz * float3(1,0,0) + r4.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r5.xy = -r2.xy * cb1[25].yy * ca_strength + v1.xy;
     r5.xyz = t0.SampleLevel(s1_s, r5.xy, 0).xyz;
     r4.xyz = r5.xyz * float3(0,1,0) + r4.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength * 2 + ca_base_offset;
     r5.xy = -r2.xy * r0.zz + v1.xy;
     r5.xyz = t0.SampleLevel(s1_s, r5.xy, 0).xyz;
     r4.xyz = r5.xyz * float3(0,1,0) + r4.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r3.xyzw = ca_base_offset.xxxx * float4(2,2,2,2) + r3.xyzw;
     r3.xyzw = -r2.xyxy * r3.xyzw + v1.xyxy;
     r5.xyz = t0.SampleLevel(s1_s, r3.xy, 0).xyz;
@@ -82,6 +90,7 @@ void main(
     r2.zw = -r2.xy * r2.zz + v1.xy;
     r5.xyz = t0.SampleLevel(s1_s, r2.zw, 0).xyz;
     r4.xyz = r5.xyz * float3(0,0,1) + r4.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength * 3 + ca_base_offset;
     r2.xy = -r2.xy * r0.zz + v1.xy;
     r2.xyz = t0.SampleLevel(s1_s, r2.xy, 0).xyz;
@@ -93,11 +102,14 @@ void main(
     r0.z = cmp(0.000000 != cb1[25].w);
     r3.xy = r0.xy * r0.ww;
     r0.xy = r0.zz ? r3.xy : r0.xy;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength * 2 + ca_base_offset;
     r0.zw = -r0.xy * r0.zz + v1.xy;
     r3.xyz = t0.SampleLevel(s1_s, r0.zw, 0).xyz;
     r1.xyz = r3.xyz * float3(0,1,0) + r1.xyz;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = ca_base_offset + ca_base_offset;
+    // RenoDX code: apply the user-controlled chromatic-aberration scale to this vanilla offset.
     r0.z = cb1[25].y * ca_strength * 3 + r0.z;
     r0.xy = -r0.xy * r0.zz + v1.xy;
     r0.xyz = t0.SampleLevel(s1_s, r0.xy, 0).xyz;
@@ -215,12 +227,28 @@ void main(
   r0.w = log2(r0.w);
   r0.w = cb1[2].y * r0.w;
   r0.w = exp2(r0.w);
+  // RenoDX code: interpolate between no vignette and the game vignette using the user setting.
   float vignette_value = lerp(1.0, r0.w, VIGNETTE_STRENGTH);
-  r0.w = 1.0; // Disable original vignette, apply after tonemapping
+  // RenoDX code: defer the game vignette until after tonemapping.
+  r0.w = 1.0;
   r1.xyz = -cb1[4].zxy + float3(1,1,1);
   r1.xyz = r0.www * r1.xyz + cb1[4].zxy;
   r0.xyz = r1.xyz * r0.xyz;
   r0.xyz = cb1[7].www * r0.xyz;
+  /*
+  Vanilla shader code from 0x8B4A9C41:
+    float3 _547 = clamp(((log2(max((((lerp(_439, (_439 - ((_439 * (max((_16_m10.w * _466) * _466, _462 - _16_m10.x) / max(_462, 9.9999997473787516355514526367188e-05f))) * _16_m9.z)) + (float3(_449.x ? _452.x : _444.x, _449.y ? _452.y : _444.y, _449.z ? _452.z : _444.z) * _16_m11.xyz), _16_m9.x.xxx) * lerp(_16_m4.xyz, 1.0f.xxx, pow(clamp(1.0f - dot(_528, _528), 0.0f, 1.0f), _16_m2.y).xxx)) * _16_m7.w) * 5.555555820465087890625f) + 0.04799599945545196533203125f.xxx, 0.0f.xxx)) * 0.3010300099849700927734375f) * 0.24416099488735198974609375f) + 0.3860360085964202880859375f.xxx, 0.0f.xxx, 1.0f.xxx);
+    float _553 = _547.z * _16_m7.z;
+    float _554 = floor(_553);
+    float2 _560 = ((_547.xy * _16_m7.z) * _16_m7.xy) + (_16_m7.xy * 0.5f);
+    float3 _561 = float3(_560.x, _560.y, _547.z);
+    _561.x = _560.x + (_554 * _16_m7.y);
+    float3 _578 = lerp(_11.SampleLevel(_14, _561.xy, 0.0f).xyz, _11.SampleLevel(_14, _561.xy + float2(_16_m7.y, 0.0f), 0.0f).xyz, (_553 - _554).xxx);
+    float3 _579 = _578 * 12.9200000762939453125f;
+    float3 _583 = (pow(abs(_578), 0.4166666567325592041015625f.xxx) * 1.05499994754791259765625f) - 0.054999999701976776123046875f.xxx;
+    bool3 _584 = bool3(_578.x <= 0.003130800090730190277099609375f.xxx.x, _578.y <= 0.003130800090730190277099609375f.xxx.y, _578.z <= 0.003130800090730190277099609375f.xxx.z);
+  */
+  // RenoDX code start: apply the selected SDR/HDR grade using the preserved linear scene color.
   LUTSampleResult lut_sample = LUTSAMPLE(s1_s, cb1[7].xyz, t2, r0.yzx);
   [branch]
   if (shader_injection.tone_map_type == 0.f) {
@@ -228,9 +256,10 @@ void main(
   } else {
     o0.xyz = HDRGRADE(lut_sample);
   }
-  // Apply vignette after tonemapping
+  // RenoDX code: apply the user-controlled vignette after tonemapping.
   o0.xyz *= vignette_value;
   float3 graded_encoded = saturate(renodx::color::srgb::EncodeSafe(o0.xyz));
+  // RenoDX code end
   float lut_z = graded_encoded.z * cb1[8].z;
   float lut_slice = floor(lut_z);
   float2 lut_uv = (graded_encoded.xy * cb1[8].z) * cb1[8].xy + cb1[8].xy * 0.5f;
@@ -239,6 +268,7 @@ void main(
       t3.SampleLevel(s0_s, lut_uv, 0).xyz,
       t3.SampleLevel(s0_s, lut_uv + float2(cb1[8].y, 0), 0).xyz,
       lut_z - lut_slice);
+  // RenoDX code start: return the vanilla composite to linear, then apply optional grain and output encoding.
   o0.xyz = renodx::color::srgb::DecodeSafe(lerp(graded_encoded, second_lut, cb1[8].w));
   if (CUSTOM_GRAIN_STRENGTH > 0) {
     o0.xyz = renodx::effects::ApplyFilmGrain(
@@ -248,7 +278,7 @@ void main(
         CUSTOM_GRAIN_STRENGTH * 0.03f);
   }
   o0.xyz = renodx::draw::RenderIntermediatePass(o0.xyz);
+  // RenoDX code end
   o0.w = min(1, r1.w);
   return;
 }
-

@@ -219,10 +219,12 @@ void comp_main()
         float4 _152 = _26[_136].xxxx;
         float _153 = _152.x;
         float _158 = max(ceil(_14_m3.x * 0.125f), 4.0f);
+        // RenoDX code start: raise the low-quality ray floor when Improved SSR is enabled.
         if (shader_injection.improved_ssr >= 0.5f)
         {
             _158 = max(_158, 32.0f);
         }
+        // RenoDX code end
         int2 _159 = int2(_136);
         float2 _658;
         float _659;
@@ -439,10 +441,12 @@ void comp_main()
             float4 _621 = mul(_6_m5, float4((_588 + ((lerp(_576 * dot(_576, _577), _577, _581) + (cross(_576, _577) * _584)) * _572)) - _6_m11.xyz, 1.0f));
             float4 _635 = mul(_6_m5, float4((_588 + ((lerp(_591 * dot(_591, _577), _577, _581) + (cross(_591, _577) * _584)) * _572)) - _6_m11.xyz, 1.0f));
             _658 = float2(exp((-length((((_518 * _518) * float2(int2(sign(_510 - 0.5f.xx)))) + _504) * _8_m0.xy)) * clamp(log(0.0199999995529651641845703125f / ((_8_m2.z * _174) + _8_m2.w)) + 0.00999999977648258209228515625f, 0.0f, 1.0f)), (_228 <= 9.9999997473787516355514526367188e-05f) ? 0.0f : (clamp(log2(sqrt(pow(distance(_615, (((_621.xy / _621.w.xx).xy * 0.5f) + 0.5f.xx) * _14_m0.xy), 2.0f) + pow(distance(_615, (((_635.xy / _635.w.xx).xy * 0.5f) + 0.5f.xx) * _14_m0.xy), 2.0f)) * 0.5f), 0.0f, _14_m5.y) / _14_m5.y));
+            // RenoDX code start: favor sharper temporal color data when Improved SSR is enabled.
             if (shader_injection.improved_ssr >= 0.5f)
             {
                 _658.y = saturate((_658.y - 0.25f) / 0.75f);
             }
+            // RenoDX code end
             _659 = _503;
             _660 = _505;
             break;

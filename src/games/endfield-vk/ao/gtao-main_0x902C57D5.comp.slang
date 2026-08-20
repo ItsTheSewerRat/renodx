@@ -20,7 +20,7 @@
 
 #define cmp -
 
-// --- Visibility Bitmask helpers (XeGTAO) ---
+// RenoDX code start: provide the optional visibility-bitmask GTAO integration.
 static const float BM_HALF_PI = 1.5707963267948966;
 static const float BM_PI = 3.1415926535897932;
 static const float BM_NUM_BITS = 32.0;
@@ -60,7 +60,7 @@ void BM_ProcessSample(float3 deltaPos, float3 viewVec, float samplingDir, float 
   frontBackH = smoothstep(0.0, 1.0, frontBackH);
   bm = BM_UpdateSectors(frontBackH.x, frontBackH.y, bm);
 }
-// --- End Visibility Bitmask helpers ---
+// RenoDX code end
 
 [[vk::binding(0, 0)]] RWTexture2D<unorm float> u0 : register(u0);
 [[vk::binding(1, 0)]] RWTexture2D<unorm float> u1 : register(u1);
@@ -70,7 +70,7 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
 {
   float4 r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15,r16;
 
-  // Select original or improved GTAO settings
+  // RenoDX code start: select improved GTAO controls while preserving the game's values when disabled.
   bool use_improved = IMPROVED_GTAO >= 0.5;
   float _ao_radius             = use_improved ? AO_RADIUS             : cb1[0].x;
   float _ao_radius_scale       = use_improved ? AO_RADIUS_SCALE       : cb1[0].y;
@@ -84,6 +84,7 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   float _ao_normal_attenuation = use_improved ? AO_NORMAL_ATTENUATION : 0.05;
   float _ao_max_mip            = use_improved ? 4.0                   : cb1[3].x - 1.0;
   bool  _ao_bitmask            = use_improved && (AO_BITMASK >= 0.5);
+  // RenoDX code end
 
   r0.xy = vThreadID.yx;
   r0.zw = float2(32, 0);
@@ -153,14 +154,13 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r0.z = rsqrt(r0.z);
   r2.xyz = -r4.xwz * r0.zzz;
 
-  // Distance-based thickness scaling: increase thickness linearly with depth
-  // to prevent over-attenuation of AO on distant objects.
-  // No scaling within 100 units (near-field), then ramps at 0.02 per unit beyond.
+  // RenoDX code start: scale occluder thickness at distance to avoid over-attenuating distant AO.
   float viewDist = length(float3(r4.x, r4.w, r4.z));
   bool use_distance_scaling = use_improved;
   float scaledThickness = use_distance_scaling
       ? _ao_thickness * (1.0 + max(0.0, viewDist - 100.0) * 0.02)
       : _ao_thickness;
+  // RenoDX code end
 
   r0.z = _ao_radius * _ao_radius_scale;
   r0.w = _ao_falloff_range * r0.z;
@@ -222,6 +222,7 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
     r6.y = r6.x * r5.w;
     r9.xy = r5.ww * r6.xx + float2(1.57079637,-1.57079637);
     r9.xy = cos(r9.xy);
+    // RenoDX code: initialize visibility accumulation for the optional bitmask path.
     uint bitmask = 0u;
     r6.w = r7.y * 0.618034005 + r0.y;
     r6.w = frac(r6.w);
@@ -259,11 +260,12 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
     r11.xyz = r11.xzw + -r4.xwz;
     r10.z = -r10.y;
     r10.xyz = r10.xzw + -r4.xwz;
-    // Bitmask: process step 0 samples
+    // RenoDX code start: accumulate the first visibility-bitmask sample pair.
     if (_ao_bitmask) {
       BM_ProcessSample(r11.xyz, r2.xyz, -1.0, r6.y, scaledThickness, bitmask);
       BM_ProcessSample(r10.xyz, r2.xyz,  1.0, r6.y, scaledThickness, bitmask);
     }
+    // RenoDX code end
     r6.w = dot(r11.xyz, r11.xyz);
     r6.w = sqrt(r6.w);
     r12.xyz = r11.xyz / r6.www;
@@ -324,11 +326,12 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
     r12.xyz = r12.xzw + -r4.xwz;
     r14.z = -r14.y;
     r14.xyz = r14.xzw + -r4.xwz;
-    // Bitmask: process step 1 samples
+    // RenoDX code start: accumulate the second visibility-bitmask sample pair.
     if (_ao_bitmask) {
       BM_ProcessSample(r12.xyz, r2.xyz, -1.0, r6.y, scaledThickness, bitmask);
       BM_ProcessSample(r14.xyz, r2.xyz,  1.0, r6.y, scaledThickness, bitmask);
     }
+    // RenoDX code end
     r7.z = dot(r12.xyz, r12.xyz);
     r7.z = sqrt(r7.z);
     r16.xyz = r12.xyz / r7.zzz;
@@ -365,11 +368,12 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
     r8.xyz = r8.xzw + -r4.xwz;
     r10.z = -r10.y;
     r10.xyz = r10.xzw + -r4.xwz;
-    // Bitmask: process step 2 samples
+    // RenoDX code start: accumulate the third visibility-bitmask sample pair.
     if (_ao_bitmask) {
       BM_ProcessSample(r8.xyz, r2.xyz, -1.0, r6.y, scaledThickness, bitmask);
       BM_ProcessSample(r10.xyz, r2.xyz,  1.0, r6.y, scaledThickness, bitmask);
     }
+    // RenoDX code end
     r7.w = dot(r8.xyz, r8.xyz);
     r7.w = sqrt(r7.w);
     r11.xyz = r8.xyz / r7.www;
@@ -392,9 +396,11 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
     r7.w = r7.w + -r9.y;
     r7.w = r8.x * r7.w + r9.y;
     r7.z = max(r7.z, r7.w);
-    // Visibility accumulation: bitmask vs arc integration
+    // RenoDX code: select visibility-bitmask accumulation when the improved mode requests it.
     if (_ao_bitmask) {
+      // RenoDX code start: convert the accumulated visibility mask to an AO contribution.
       r7.x += (1.0 - (float)countbits(bitmask) / 32.0);
+      // RenoDX code end
     } else {
     r7.w = abs(r7.z) * -0.156582996 + 1.57079601;
     r8.x = 1 + -abs(r7.z);
@@ -441,9 +447,11 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r0.x = max(0.0299999993, r0.x);
   r0.x = 0.666666687 * r0.x;
   r0.x = min(1, r0.x);
+  // RenoDX code start: bypass game AO when requested by the addon.
   if (shader_injection.disable_game_ao >= 0.5f) {
     r0.x = 1.0f;
   }
+  // RenoDX code end
   u0[vThreadID.xy] = r0.x;
   return;
 }

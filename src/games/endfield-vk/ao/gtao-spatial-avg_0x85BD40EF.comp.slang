@@ -35,9 +35,11 @@ void main(uint3 vThreadID : SV_DispatchThreadID)
   r0.y = r0.y + r0.w;
   r0.x = r0.y + r0.x;
   r0.x = 0.200000003 * r0.x;
+  // RenoDX code start: bypass game AO when requested by the addon.
   if (shader_injection.disable_game_ao >= 0.5f) {
     r0.x = 1.0f;
   }
+  // RenoDX code end
   u0[vThreadID.xy] = r0.x;
   return;
 }

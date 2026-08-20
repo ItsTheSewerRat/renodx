@@ -561,11 +561,13 @@ void frag_main()
         _1105 = (_16_m51.xyz * (1.0f - _878)) + (((_16_m54.xyz * pow(clamp(dot(_268, _16_m53.xyz), 0.0f, 1.0f), _16_m54.w)) * (1.0f - clamp(exp2(-(_853 * max(_269 - _16_m53.w, 0.0f))), 0.0f, 1.0f))) * (1.0f - _875));
         _1106 = _878;
     }
+    // RenoDX code start: apply the hue-preserving fog composite.
     if (RENODX_CUSTOM_FOG > 0.5f)
     {
         _1105 *= 0.65f.xxx;
         _1106 = (_1106 * 0.65f) + 0.35f;
     }
+    // RenoDX code end
     float3 _1110 = _722.xyz;
     float _1117 = clamp(_249 / _34_m87, 0.0f, 1.0f);
     bool3 _1127 = (_34_m1 == 2.0f).xxx;

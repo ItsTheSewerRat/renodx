@@ -62,8 +62,10 @@ void main(
   r0.x = log2(r0.x);
   r0.x = cb1[2].y * r0.x;
   r0.x = exp2(r0.x);
+  // RenoDX code: interpolate between no vignette and the game vignette using the user setting.
   float vignette_value = lerp(1.0, r0.x, VIGNETTE_STRENGTH);
-  r0.x = 1.0; // Disable original vignette, apply after tonemapping
+  // RenoDX code: defer the game vignette until after tonemapping.
+  r0.x = 1.0;
   r0.yzw = -cb1[4].zxy + float3(1,1,1);
   r0.xyz = r0.xxx * r0.yzw + cb1[4].zxy;
   r1.xyz = t1.SampleLevel(s0_s, v1.xy, 0).xyz;
@@ -95,6 +97,21 @@ void main(
   r1.xyz = cb1[9].xxx * r1.xyz + r3.xyz;
   r0.xyz = r1.xyz * r0.xyz;
   r0.xyz = cb1[7].www * r0.xyz;
+  /*
+  Vanilla shader code from 0xD2389A17:
+    float3 _220 = clamp(((log2(max((((lerp(_112, (_112 - ((_112 * (max((_14_m10.w * _139) * _139, _135 - _14_m10.x) / max(_135, 9.9999997473787516355514526367188e-05f))) * _14_m9.z)) + (float3(_122.x ? _125.x : _117.x, _122.y ? _125.y : _117.y, _122.z ? _125.z : _117.z) * _14_m11.xyz), _14_m9.x.xxx) * lerp(_14_m4.xyz, 1.0f.xxx, pow(clamp(1.0f - dot(_201, _201), 0.0f, 1.0f), _14_m2.y).xxx)) * _14_m7.w) * 5.555555820465087890625f) + 0.04799599945545196533203125f.xxx, 0.0f.xxx)) * 0.3010300099849700927734375f) * 0.24416099488735198974609375f) + 0.3860360085964202880859375f.xxx, 0.0f.xxx, 1.0f.xxx);
+    float _226 = _220.z * _14_m7.z;
+    float _227 = floor(_226);
+    float2 _233 = ((_220.xy * _14_m7.z) * _14_m7.xy) + (_14_m7.xy * 0.5f);
+    float3 _234 = float3(_233.x, _233.y, _220.z);
+    _234.x = _233.x + (_227 * _14_m7.y);
+    float3 _251 = lerp(_11.SampleLevel(_12, _234.xy, 0.0f).xyz, _11.SampleLevel(_12, _234.xy + float2(_14_m7.y, 0.0f), 0.0f).xyz, (_226 - _227).xxx);
+    float3 _252 = _251 * 12.9200000762939453125f;
+    float3 _256 = (pow(abs(_251), 0.4166666567325592041015625f.xxx) * 1.05499994754791259765625f) - 0.054999999701976776123046875f.xxx;
+    bool3 _257 = bool3(_251.x <= 0.003130800090730190277099609375f.xxx.x, _251.y <= 0.003130800090730190277099609375f.xxx.y, _251.z <= 0.003130800090730190277099609375f.xxx.z);
+    _4 = float4(float3(_257.x ? _252.x : _256.x, _257.y ? _252.y : _256.y, _257.z ? _252.z : _256.z) + (((frac(dot(float2(171.0f, 231.0f), _3 * _6_m0.xy).xxx * float3(0.00970873795449733734130859375f, 0.0140845067799091339111328125f, 0.010309278033673763275146484375f)) - 0.5f.xxx) * 0.0039215688593685626983642578125f.xxx) * 0.3499999940395355224609375f), min(_107.w, 1.0f));
+  */
+  // RenoDX code start: apply the selected SDR/HDR grade using the preserved linear scene color.
 
   LUTSampleResult lut_sample = LUTSAMPLE(s0_s, cb1[7].xyz, t2, r0.yzx);
   [branch]
@@ -103,7 +120,7 @@ void main(
   } else {
     o0.xyz = HDRGRADE(lut_sample);
   }
-  // Apply vignette after tonemapping
+  // RenoDX code: apply the user-controlled vignette after tonemapping.
   o0.xyz *= vignette_value;
   if (CUSTOM_GRAIN_STRENGTH > 0) {
     o0.xyz = renodx::effects::ApplyFilmGrain(
@@ -113,5 +130,6 @@ void main(
         CUSTOM_GRAIN_STRENGTH * 0.03f);
   }
   o0.xyz = renodx::draw::RenderIntermediatePass(o0.xyz);
+  // RenoDX code end
   return;
 }

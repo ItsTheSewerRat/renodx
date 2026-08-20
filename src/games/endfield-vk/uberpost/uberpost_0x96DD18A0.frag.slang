@@ -153,6 +153,21 @@ void main(
   r0.xyz = -r0.xyz * cb0[27].xxx + r2.xyz;
   r0.xyz = cb1[9].xxx * r0.xyz + r1.xyz;
   r0.xyz = cb1[7].www * r0.xyz;
+  /*
+  Vanilla shader code from 0x96DD18A0:
+    float3 _376 = clamp(((log2(max(((lerp(_318, (_318 - ((_318 * (max((_14_m10.w * _345) * _345, _341 - _14_m10.x) / max(_341, 9.9999997473787516355514526367188e-05f))) * _14_m9.z)) + (float3(_328.x ? _331.x : _323.x, _328.y ? _331.y : _323.y, _328.z ? _331.z : _323.z) * _14_m11.xyz), _14_m9.x.xxx) * _14_m7.w) * 5.555555820465087890625f) + 0.04799599945545196533203125f.xxx, 0.0f.xxx)) * 0.3010300099849700927734375f) * 0.24416099488735198974609375f) + 0.3860360085964202880859375f.xxx, 0.0f.xxx, 1.0f.xxx);
+    float _382 = _376.z * _14_m7.z;
+    float _383 = floor(_382);
+    float2 _389 = ((_376.xy * _14_m7.z) * _14_m7.xy) + (_14_m7.xy * 0.5f);
+    float3 _390 = float3(_389.x, _389.y, _376.z);
+    _390.x = _389.x + (_383 * _14_m7.y);
+    float3 _407 = lerp(_11.SampleLevel(_12, _390.xy, 0.0f).xyz, _11.SampleLevel(_12, _390.xy + float2(_14_m7.y, 0.0f), 0.0f).xyz, (_382 - _383).xxx);
+    float3 _408 = _407 * 12.9200000762939453125f;
+    float3 _412 = (pow(abs(_407), 0.4166666567325592041015625f.xxx) * 1.05499994754791259765625f) - 0.054999999701976776123046875f.xxx;
+    bool3 _413 = bool3(_407.x <= 0.003130800090730190277099609375f.xxx.x, _407.y <= 0.003130800090730190277099609375f.xxx.y, _407.z <= 0.003130800090730190277099609375f.xxx.z);
+    _4 = float4(float3(_413.x ? _408.x : _412.x, _413.y ? _408.y : _412.y, _413.z ? _408.z : _412.z) + (((frac(dot(float2(171.0f, 231.0f), _3 * _6_m0.xy).xxx * float3(0.00970873795449733734130859375f, 0.0140845067799091339111328125f, 0.010309278033673763275146484375f)) - 0.5f.xxx) * 0.0039215688593685626983642578125f.xxx) * 0.3499999940395355224609375f), min(_134.w, 1.0f));
+  */
+  // RenoDX code start: apply the selected SDR/HDR grade using the preserved linear scene color.
   LUTSampleResult lut_sample = LUTSAMPLE(s0_s, cb1[7].xyz, t2, r0.yzx);
   [branch]
   if (shader_injection.tone_map_type == 0.f) {
@@ -168,6 +183,7 @@ void main(
         CUSTOM_GRAIN_STRENGTH * 0.03f);
   }
   o0.xyz = renodx::draw::RenderIntermediatePass(o0.xyz);
+  // RenoDX code end
   o0.w = min(1, r1.w);
   return;
 }

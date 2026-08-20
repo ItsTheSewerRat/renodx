@@ -12,6 +12,7 @@ cbuffer cb0 : register(b0) {
   float cb0_tail;
 }
 
+// RenoDX code start: implement the optional linear-light RCAS pass.
 float3 ApplyRCAS(float3 center_color, float2 uv) {
   if (shader_injection.fx_rcas_amount == 0.f) return center_color;
 
@@ -64,7 +65,9 @@ float3 ApplyRCAS(float3 center_color, float2 uv) {
       * rcp(4.f * lobe + 1.f);
   return clamp(resolved_luma / e_luma, 0.f, 4.f) * e * normalization;
 }
+// RenoDX code end
 
+// RenoDX code start: implement the optional technical-test color calibration.
 float3 ApplyColorCalibration(float3 color) {
   float3 adapted;
   adapted.r = dot(color, float3(1.00113f, -0.00212f, -0.01555f));
@@ -94,17 +97,20 @@ float3 ApplyColorCalibration(float3 color) {
   calibrated.b = dot(lms, float3(-0.0041960863f, -0.7034186147f, 1.7076147010f));
   return calibrated;
 }
+// RenoDX code end
 
 void main(
     float4 position : SV_Position,
     float2 uv : TEXCOORD0,
     out float4 output : SV_Target0) {
   float3 color = t0.SampleLevel(s0_s, uv, cb0[2].x).rgb;
+  // RenoDX code start: apply the selected optional post-processing passes.
   if (shader_injection.fx_rcas_sharpening >= 1.f) {
     color = ApplyRCAS(color, uv);
   }
   if (TECH_TEST_LOOK > 0.5f) {
     color = ApplyColorCalibration(color);
   }
+  // RenoDX code end
   output = float4(color, 0.f);
 }
