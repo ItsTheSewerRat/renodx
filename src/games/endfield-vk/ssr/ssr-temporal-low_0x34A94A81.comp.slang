@@ -80,7 +80,10 @@ void main(uint3 vThreadGroupID : SV_GroupID, uint3 vThreadIDInGroup : SV_GroupTh
 #else
       r1.w = cb2[3].x * 0.125;
       r1.w = ceil(r1.w);
-      r1.w = max(r1.w, (shader_injection.improved_ssr >= 0.5f) ? 32.0f : 4.0f);
+      r1.w = max(r1.w, 4.0f);
+      if (shader_injection.improved_ssr >= 0.5f) {
+        r1.w = max(r1.w, 32.0f);
+      }
 #endif
       r3.z = t2.SampleLevel(s0_s, r2.xy, 0).x;
       r3.xy = r2.xy * float2(2,2) + float2(-1,-1);
